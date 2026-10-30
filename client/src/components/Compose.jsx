@@ -219,6 +219,9 @@ export default function Compose({ init = {}, onClose, onSent, onDeferredSend }) 
         const attachments = [];
         const largeList = []; // fichiers volumineux web-seedés (config rétention post-envoi)
         for (const f of files) {
+          // Chaque tentative utilise une nouvelle capacité : un dépôt publié
+          // ne peut être écrasé, même si l'envoi du message a ensuite échoué.
+          const transferId = newTransferId();
           // Fichier > 50 Mo → transfert VOLUMINEUX : téléversé BRUT (non chiffré) en STREAM
           // vers le serveur, qui génère un .torrent web-seed. Le destinataire le récupère via
           // un client BitTorrent (sans pair requis) ou en téléchargement direct. Pas de P2P WebTorrent.
@@ -230,7 +233,7 @@ export default function Compose({ init = {}, onClose, onSent, onDeferredSend }) 
                 headers: {
                   Authorization: 'Bearer ' + getToken(),
                   'Content-Type': 'application/octet-stream',
-                  'X-Transfer-Id': f.transferId,
+                  'X-Transfer-Id': transferId,
                   'X-Filename': encodeURIComponent(f.file.name),
                   'X-Mimetype': f.file.type || 'application/octet-stream',
                   'X-Size': String(f.file.size),
@@ -246,31 +249,35 @@ export default function Compose({ init = {}, onClose, onSent, onDeferredSend }) 
             }
             if (!up?.torrent?.url) throw new Error(`Le serveur n'a pas pu préparer le torrent de « ${f.file.name} ».`);
             attachments.push({
-              transferId: f.transferId, filename: f.file.name, size: f.file.size,
+              transferId, filename: f.file.name, size: f.file.size,
               mimetype: f.file.type || 'application/octet-stream', encrypted: false,
               webseed: { torrentUrl: up.torrent.url, downloadUrl: up.torrent.webSeed },
             });
-            largeList.push({ infoHash: up.torrent.infoHash, transferId: f.transferId, filename: f.file.name, size: f.file.size });
+            largeList.push({ infoHash: up.torrent.infoHash, transferId, filename: f.file.name, size: f.file.size });
             continue;
           }
           const buf = await f.file.arrayBuffer();
           const { ct, ivB64 } = await encryptAttachment(buf, f.key);
-          offerFile(f.transferId, ct, ivB64);
+          offerFile(transferId, ct, ivB64);
           if (offlineEmails.length) {
-            await fetch('/api/attachments', {
+            const fallback = await fetch('/api/attachments', {
               method: 'POST',
               headers: {
                 Authorization: 'Bearer ' + getToken(),
                 'Content-Type': 'application/octet-stream',
-                'X-Transfer-Id': f.transferId, 'X-IV': ivB64,
+                'X-Transfer-Id': transferId, 'X-IV': ivB64,
                 'X-Filename': encodeURIComponent(f.file.name),
                 'X-Mimetype': f.file.type || 'application/octet-stream',
                 'X-Size': String(f.file.size), 'X-To': offlineEmails.join(','),
               },
               body: ct,
-            }).catch(() => {});
+            });
+            if (!fallback.ok) {
+              const error = await fallback.json().catch(() => null);
+              throw new Error(error?.error || `Échec du dépôt de « ${f.file.name} » (HTTP ${fallback.status}).`);
+            }
           }
-          attachments.push({ transferId: f.transferId, filename: f.file.name, size: f.file.size, mimetype: f.file.type || 'application/octet-stream', key: f.key });
+          attachments.push({ transferId, filename: f.file.name, size: f.file.size, mimetype: f.file.type || 'application/octet-stream', key: f.key });
         }
 
         const enc = await encryptMessage({ subject, body, attachments }, pubKeysByEmail);
@@ -362,14 +369,14 @@ export default function Compose({ init = {}, onClose, onSent, onDeferredSend }) 
         <div className="compose" style={{ maxWidth: 460 }}>
           <div className="compose-bar">Fichier volumineux envoyé · torrent<button onClick={() => { setTorrentConfig(null); onSent(); }} title="Fermer"><Icon name="close" size={18} /></button></div>
           <div style={{ padding: '6px 16px 16px' }}>
-            <p className="setting-desc" style={{ marginTop: 0 }}>Vos fichiers (&gt; 50 Mo) sont hébergés sur le serveur (<b>non chiffrés</b>) et partagés en <b>torrent web-seed</b> : le destinataire les récupère via <b>un client BitTorrent</b> (sans pair requis) ou en téléchargement direct. Réglez leur durée de disponibilité et, au besoin, un nombre maximal de téléchargements.</p>
+            <p className="setting-desc" style={{ marginTop: 0 }}>Vos fichiers (&gt; 50 Mo) sont hébergés sur le serveur (<b>non chiffrés</b>) et partagés en <b>torrent web-seed</b> : le destinataire les récupère via <b>un client BitTorrent</b> (sans pair requis) ou en téléchargement direct. Le plafond concerne les téléchargements directs effectués en une seule fois. Il ne limite ni les téléchargements torrent ni les reprises partielles. La durée de conservation borne la disponibilité sur ce serveur.</p>
             {torrentConfig.list.map((it) => <div key={it.infoHash} className="att-chip" style={{ marginBottom: 6 }}><Icon name="paperclip" size={13} /> {it.filename}</div>)}
             <div className="field" style={{ marginTop: 10 }}><label>Conservation</label>
               <select value={torrentConfig.retentionDays} onChange={(e) => setTorrentConfig({ ...torrentConfig, retentionDays: e.target.value })}>
                 <option value="1">1 jour</option><option value="7">7 jours</option><option value="30">30 jours</option><option value="0">Tant que l'application tourne</option>
               </select>
             </div>
-            <div className="field" style={{ marginTop: 8 }}><label>Téléchargements max (optionnel)</label>
+            <div className="field" style={{ marginTop: 8 }}><label>Téléchargements complets max, hors torrent/reprises</label>
               <input type="number" min="0" placeholder="illimité" value={torrentConfig.maxDownloads} onChange={(e) => setTorrentConfig({ ...torrentConfig, maxDownloads: e.target.value })} />
             </div>
             <div className="modal-foot" style={{ marginTop: 14 }}><button className="btn" onClick={finishTorrent}>Terminer</button></div>
