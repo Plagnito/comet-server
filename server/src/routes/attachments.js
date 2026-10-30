@@ -1,21 +1,24 @@
-import express, { Router } from 'express';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { Router } from 'express';
 import {
-  mkdirSync, writeFileSync, existsSync, readFileSync, unlinkSync,
-  statSync, createReadStream, createWriteStream, renameSync,
+  writeFileSync, existsSync, readFileSync, unlinkSync,
+  statSync, createReadStream, createWriteStream, linkSync,
 } from 'node:fs';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { db } from '../db.js';
 import { authRequired } from '../auth.js';
 import { createWebSeedTorrentFromFile } from '../services/torrent.js';
+import { blobPath, torrentPath, validTransferId, UPLOAD_LIMITS, reserveTransfer, completeTransfer, releaseTransfer, storageError } from '../services/attachment-storage.js';
 
 const router = Router();
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const BLOB_DIR = join(__dirname, '..', '..', 'data', 'attachments');
-mkdirSync(BLOB_DIR, { recursive: true });
-const safeId = (transferId) => String(transferId).replace(/[^a-zA-Z0-9_-]/g, '');
-const blobPath = (transferId) => join(BLOB_DIR, `${safeId(transferId)}.bin`);
-const torrentPath = (transferId) => join(BLOB_DIR, `${safeId(transferId)}.torrent`);
+router.use((req, res, next) => {
+  // Refuser les alias sur toutes les routes, sans retirer de caractères.
+  const id = req.path.split('/')[1]?.replace(/\.torrent$/, '');
+  let decoded;
+  try { decoded = decodeURIComponent(id || ''); } catch { return res.status(400).json({ error: 'Identifiant invalide' }); }
+  if (decoded && !validTransferId(decoded)) return res.status(400).json({ error: 'Identifiant invalide' });
+  next();
+});
 
 // Base publique ABSOLUE (mêmes règles que le reste du serveur) : les URL du torrent
 // et du web-seed DOIVENT être joignables par un client BitTorrent/HTTP, sans auth.
@@ -48,17 +51,16 @@ function purgeLarge(transferId) {
   try { db.prepare('DELETE FROM large_transfers WHERE transfer_id = ?').run(transferId); } catch {}
   try { unlinkSync(blobPath(transferId)); } catch {}
   try { unlinkSync(torrentPath(transferId)); } catch {}
+  releaseTransfer(transferId);
 }
 
 // Comptabilise un téléchargement DIRECT complet (réponse 200) ; applique le plafond.
 // Le trafic torrent (requêtes Range) n'est PAS compté (voir streamBlob).
 function countDownload(transferId) {
   try {
-    const row = db.prepare('SELECT downloads, max_downloads FROM large_transfers WHERE transfer_id = ?').get(transferId);
+    const row = db.prepare('UPDATE large_transfers SET downloads = downloads + 1 WHERE transfer_id = ? RETURNING downloads, max_downloads').get(transferId);
     if (!row) return;
-    const n = row.downloads + 1;
-    db.prepare('UPDATE large_transfers SET downloads = ? WHERE transfer_id = ?').run(n, transferId);
-    if (row.max_downloads > 0 && n >= row.max_downloads) purgeLarge(transferId);
+    if (row.max_downloads > 0 && row.downloads >= row.max_downloads) purgeLarge(transferId);
   } catch {}
 }
 
@@ -111,82 +113,131 @@ function emailToId(raw) {
   return db.prepare('SELECT id FROM users WHERE email = ?').get(e)?.id || null;
 }
 
+// Les deux flux partagent l'admission, les réservations et le même espace disque.
+// Même un client chunked sans taille annoncée ne peut contourner la borne réelle.
+async function receiveUpload(req, res, transferId, maxBytes, prepare) {
+  const finalPath = blobPath(transferId);
+  const partPath = `${finalPath}.part`;
+  let reserved = false; let partOwned = false; let finalOwned = false; let torrentOwned = false;
+  let transaction = false; let committed = false; let size = 0;
+  const controller = new AbortController();
+  const abort = () => controller.abort(storageError(400, 'Téléversement interrompu'));
+  const responseClosed = () => { if (!res.writableFinished) abort(); };
+  const timer = setTimeout(() => controller.abort(storageError(408, 'Délai de téléversement dépassé')), UPLOAD_LIMITS.timeout);
+  timer.unref();
+  req.once('aborted', abort); req.once('error', abort); res.once('close', responseClosed);
+  let counter;
+  try {
+    if (req.readableEnded) throw storageError(400, 'Corps binaire brut requis');
+    const announced = req.get('Content-Length');
+    const budget = announced === undefined ? maxBytes : Number(announced);
+    if (budget > maxBytes) throw storageError(413, 'Fichier trop volumineux');
+    reserveTransfer(transferId, req.user.id, budget); reserved = true;
+    counter = new Transform({ transform(chunk, encoding, callback) {
+      size += chunk.length;
+      callback(size > maxBytes || size > budget ? storageError(413, 'Fichier trop volumineux') : null, chunk);
+    } });
+    const ws = createWriteStream(partPath, { flags: 'wx' });
+    ws.once('open', () => { partOwned = true; });
+    req.pipe(counter);
+    // req reste hors du pipeline : répondre 413 avant de fermer la connexion.
+    await pipeline(counter, ws, { signal: controller.signal });
+    if (!size) throw storageError(400, 'Fichier vide');
+    controller.signal.throwIfAborted();
+    const prepared = await prepare(partPath, size);
+    controller.signal.throwIfAborted();
+    linkSync(partPath, finalPath); finalOwned = true;
+    if (prepared.torrent) {
+      writeFileSync(torrentPath(transferId), prepared.torrent, { flag: 'wx' }); torrentOwned = true;
+    }
+    unlinkSync(partPath); partOwned = false;
+    db.exec('BEGIN IMMEDIATE'); transaction = true;
+    prepared.commit();
+    completeTransfer(transferId, size);
+    db.exec('COMMIT'); transaction = false; committed = true;
+    res.status(201).json(prepared.response);
+  } catch (error) {
+    if (transaction) db.exec('ROLLBACK');
+    if (counter) req.unpipe(counter);
+    req.resume();
+    if (!committed) {
+      if (partOwned) { try { unlinkSync(partPath); } catch {} }
+      if (finalOwned) { try { unlinkSync(finalPath); } catch {} }
+      if (torrentOwned) { try { unlinkSync(torrentPath(transferId)); } catch {} }
+      if (reserved) releaseTransfer(transferId);
+    }
+    const cause = controller.signal.aborted ? controller.signal.reason : error;
+    if (!req.aborted && !res.destroyed && !res.headersSent) {
+      // Après un refus, fermer une fois la réponse envoyée au lieu de drainer
+      // indéfiniment le corps d'un client qui continue de téléverser.
+      res.setHeader('Connection', 'close');
+      res.status(cause.status || (cause.code === 'EEXIST' ? 409 : 500)).json({ error: cause.status ? cause.message : 'Dépôt impossible' });
+    }
+  } finally {
+    clearTimeout(timer);
+    if (counter) req.unpipe(counter);
+    req.off('aborted', abort); req.off('error', abort); res.off('close', responseClosed);
+  }
+}
+
 // ── Dépôt E2EE (≤ 50 Mo) : le ciphertext (opaque) est envoyé en corps binaire brut ──
-// Chemin INCHANGÉ (repli serveur des pièces jointes chiffrées, usage unique).
-router.post('/', authRequired, express.raw({ type: '*/*', limit: '80mb' }), (req, res) => {
-  const transferId = String(req.get('X-Transfer-Id') || '').trim();
+// Repli serveur des pièces jointes chiffrées, réservé aux destinataires, usage unique.
+router.post('/', authRequired, async (req, res) => {
+  const transferId = req.get('X-Transfer-Id');
   const iv = String(req.get('X-IV') || '').trim();
   let filename = 'fichier';
   try { filename = decodeURIComponent(req.get('X-Filename') || '').slice(0, 255) || 'fichier'; } catch {}
   const mimetype = String(req.get('X-Mimetype') || 'application/octet-stream').slice(0, 120);
   const size = Number(req.get('X-Size') || 0);
   const to = String(req.get('X-To') || '').split(',').map((x) => x.trim()).filter(Boolean);
-  if (!transferId || !iv || !req.body?.length || to.length === 0) return res.status(400).json({ error: 'Dépôt invalide' });
-
-  if (!existsSync(blobPath(transferId))) writeFileSync(blobPath(transferId), req.body);
-  const ins = db.prepare('INSERT OR IGNORE INTO attachments (transfer_id, recipient_id, filename, mimetype, size, iv) VALUES (?, ?, ?, ?, ?, ?)');
-  let stored = 0;
-  for (const email of to) { const id = emailToId(email); if (id) { ins.run(transferId, id, filename, mimetype, size, iv); stored++; } }
-  res.status(201).json({ ok: true, stored });
+  const recipients = [...new Set(to.map(emailToId).filter(Boolean))];
+  if (!validTransferId(transferId) || !iv || !recipients.length
+    || !Number.isSafeInteger(size) || size < 0) return res.status(400).json({ error: 'Dépôt invalide' });
+  await receiveUpload(req, res, transferId, Math.min(80 * 1024 ** 2, UPLOAD_LIMITS.file), async () => ({
+    response: { ok: true, stored: recipients.length },
+    commit() {
+      const ins = db.prepare('INSERT INTO attachments (transfer_id, recipient_id, filename, mimetype, size, iv) VALUES (?, ?, ?, ?, ?, ?)');
+      for (const id of recipients) ins.run(transferId, id, filename, mimetype, size, iv);
+    },
+  }));
 });
 
 // ── Dépôt VOLUMINEUX (> 50 Mo), NON chiffré, en STREAM vers le disque ───────────
-// Aucun analyseur de corps (octet-stream) → req est un flux brut : pas de limite de
-// taille, aucun X-IV. On écrit dans un fichier .part puis on renomme, puis on génère
+// Aucun analyseur de corps (octet-stream) → req est un flux brut borné en octets
+// et en durée, sans X-IV. Création exclusive .part, puis publication sans écrasement.
 // le .torrent web-seed EN STREAMANT le fichier (jamais tout en RAM). Décidé par le
 // produit : les fichiers volumineux ne sont PAS E2EE (web-seed = fichier utilisable).
-router.post('/large', authRequired, (req, res) => {
-  const transferId = String(req.get('X-Transfer-Id') || '').trim();
-  if (!transferId) return res.status(400).json({ error: 'Transfert invalide' });
+router.post('/large', authRequired, async (req, res) => {
+  const transferId = req.get('X-Transfer-Id');
+  if (!validTransferId(transferId)) return res.status(400).json({ error: 'Transfert invalide' });
   let filename = 'fichier';
   try { filename = decodeURIComponent(req.get('X-Filename') || '').slice(0, 255) || 'fichier'; } catch {}
   const mimetype = String(req.get('X-Mimetype') || 'application/octet-stream').slice(0, 120);
   const retentionDays = Math.max(0, Number(req.get('X-Retention-Days') || 7) || 0);
   const maxDownloads = Math.max(0, Number(req.get('X-Max-Downloads') || 0) || 0);
 
-  const finalPath = blobPath(transferId);
-  const partPath = `${finalPath}.part`;
-  const ws = createWriteStream(partPath);
-  let aborted = false;
-  const cleanupPart = () => { try { unlinkSync(partPath); } catch {} };
-
-  const fail = (code, msg) => { aborted = true; try { ws.destroy(); } catch {} cleanupPart(); if (!res.headersSent) res.status(code).json({ error: msg }); };
-  req.on('aborted', () => { aborted = true; try { ws.destroy(); } catch {} cleanupPart(); });
-  req.on('error', () => fail(400, 'Téléversement interrompu'));
-  ws.on('error', () => fail(500, 'Écriture impossible (espace disque ?)'));
-
-  ws.on('finish', async () => {
-    if (aborted) return;
-    try {
-      renameSync(partPath, finalPath);
+  await receiveUpload(req, res, transferId, UPLOAD_LIMITS.file, async (partPath, size) => {
       const base = baseUrlFor(req);
       const webSeedUrl = `${base}/api/attachments/${encodeURIComponent(transferId)}/webseed`;
       const torrentUrl = `${base}/api/attachments/${encodeURIComponent(transferId)}.torrent`;
-      const { torrent: bytes, infoHash } = await createWebSeedTorrentFromFile(finalPath, { name: filename, webSeedUrl });
-      writeFileSync(torrentPath(transferId), bytes);
-
-      const actualSize = statSync(finalPath).size;
-      db.prepare('DELETE FROM large_transfers WHERE transfer_id = ?').run(transferId);
-      db.prepare(`INSERT INTO large_transfers (transfer_id, filename, mimetype, size, sender_id, info_hash, expires_at, max_downloads)
+      const { torrent: bytes, infoHash } = await createWebSeedTorrentFromFile(partPath, { name: filename, webSeedUrl });
+      return {
+        torrent: bytes,
+        response: { ok: true, torrent: { url: torrentUrl, webSeed: webSeedUrl, infoHash } },
+        commit() {
+          db.prepare(`INSERT INTO large_transfers (transfer_id, filename, mimetype, size, sender_id, info_hash, expires_at, max_downloads)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(transferId, filename, mimetype, actualSize, req.user.id, infoHash, expiryFor(retentionDays), maxDownloads);
-
-      res.status(201).json({ ok: true, torrent: { url: torrentUrl, webSeed: webSeedUrl, infoHash } });
-    } catch (e) {
-      try { unlinkSync(finalPath); } catch {}
-      try { unlinkSync(torrentPath(transferId)); } catch {}
-      console.warn('[attachments] préparation torrent volumineux échouée:', e?.message || e);
-      if (!res.headersSent) res.status(500).json({ error: 'Préparation du torrent impossible' });
-    }
+        .run(transferId, filename, mimetype, size, req.user.id, infoHash, expiryFor(retentionDays), maxDownloads);
+        },
+      };
   });
-
-  req.pipe(ws);
 });
 
 // ── Rétention : régler durée de conservation / nb max de téléchargements ────────
 // Réutilise les valeurs du panneau « torrent » du compositeur (retentionDays / maxDownloads).
 router.post('/config', authRequired, (req, res) => {
-  const transferId = String(req.body?.transferId || '').trim();
+  const transferId = req.body?.transferId;
+  if (!validTransferId(transferId)) return res.status(400).json({ error: 'Transfert invalide' });
   const row = db.prepare('SELECT sender_id FROM large_transfers WHERE transfer_id = ?').get(transferId);
   if (!row) return res.status(404).json({ error: 'Transfert inconnu' });
   if (row.sender_id !== req.user.id) return res.status(403).json({ error: 'Non autorisé' });
@@ -194,7 +245,7 @@ router.post('/config', authRequired, (req, res) => {
   const maxDownloads = Math.max(0, Number(req.body?.maxDownloads ?? 0) || 0);
   const expiresAt = expiryFor(retentionDays);
   db.prepare('UPDATE large_transfers SET expires_at = ?, max_downloads = ? WHERE transfer_id = ?').run(expiresAt, maxDownloads, transferId);
-  res.json({ ok: true, expiresAt, maxDownloads });
+  res.json({ ok: true, expiresAt, maxDownloads, downloadLimitScope: 'full-responses-only' });
 });
 
 // ── Web-seed & .torrent : PUBLICS (aucune auth) ─────────────────────────────
@@ -206,7 +257,9 @@ router.post('/config', authRequired, (req, res) => {
 
 // Le fichier .torrent lui-même.
 router.get(/^\/([A-Za-z0-9_-]+)\.torrent$/, (req, res) => {
-  const id = safeId(req.params[0]);
+  const id = req.params[0];
+  const row = db.prepare("SELECT 1 FROM large_transfers WHERE transfer_id = ? AND (expires_at IS NULL OR expires_at > datetime('now'))").get(id);
+  if (!row) return res.status(404).json({ error: 'Torrent indisponible' });
   const tp = torrentPath(id);
   if (!existsSync(tp)) return res.status(404).json({ error: 'Torrent indisponible' });
   res.setHeader('Content-Type', 'application/x-bittorrent');
@@ -216,11 +269,12 @@ router.get(/^\/([A-Za-z0-9_-]+)\.torrent$/, (req, res) => {
 
 // Le web-seed BEP-19 : sert les octets du fichier (avec support des requêtes Range).
 router.get('/:transferId/webseed', (req, res) => {
-  const id = safeId(req.params.transferId);
+  const id = req.params.transferId;
+  const meta = db.prepare("SELECT filename, mimetype FROM large_transfers WHERE transfer_id = ? AND (expires_at IS NULL OR expires_at > datetime('now'))").get(id);
+  if (!meta) return res.status(404).json({ error: 'Indisponible' });
   if (!existsSync(torrentPath(id))) return res.status(404).json({ error: 'Indisponible' });
   const bp = blobPath(id);
   if (!existsSync(bp)) return res.status(404).json({ error: 'Blob manquant' });
-  const meta = db.prepare('SELECT filename, mimetype FROM large_transfers WHERE transfer_id = ?').get(id);
   streamBlob(req, res, { path: bp, filename: meta?.filename, mimetype: meta?.mimetype, count: true, transferId: id });
 });
 
@@ -228,11 +282,11 @@ router.get('/:transferId/webseed', (req, res) => {
 router.get('/:transferId', authRequired, (req, res) => {
   // Transfert VOLUMINEUX (non chiffré) : sert le fichier UTILISABLE en stream, SANS
   // X-IV et SANS purge (disponible pendant la fenêtre de rétention).
-  const large = db.prepare('SELECT filename, mimetype FROM large_transfers WHERE transfer_id = ?').get(req.params.transferId);
+  const large = db.prepare("SELECT filename, mimetype FROM large_transfers WHERE transfer_id = ? AND (expires_at IS NULL OR expires_at > datetime('now'))").get(req.params.transferId);
   if (large) {
     const bp = blobPath(req.params.transferId);
     if (!existsSync(bp)) return res.status(404).json({ error: 'Fichier indisponible' });
-    return streamBlob(req, res, { path: bp, filename: large.filename, mimetype: large.mimetype, count: true, transferId: safeId(req.params.transferId) });
+    return streamBlob(req, res, { path: bp, filename: large.filename, mimetype: large.mimetype, count: true, transferId: req.params.transferId });
   }
 
   // ── Chemin E2EE (≤ 50 Mo) INCHANGÉ : purge après lecture par le destinataire ──
@@ -250,7 +304,7 @@ router.get('/:transferId', authRequired, (req, res) => {
   // Purge : on consomme l'entrée ; si plus aucun destinataire en attente, on efface le blob
   db.prepare('DELETE FROM attachments WHERE id = ?').run(row.id);
   const remaining = db.prepare('SELECT COUNT(*) AS n FROM attachments WHERE transfer_id = ?').get(req.params.transferId).n;
-  if (remaining === 0) { try { unlinkSync(path); } catch {} }
+  if (remaining === 0) { try { unlinkSync(path); } catch {} releaseTransfer(req.params.transferId); }
 });
 
 export default router;
