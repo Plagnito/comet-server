@@ -14,11 +14,11 @@ describe('CORS — même origine', () => {
     expect(r.headers['access-control-allow-origin']).toBe('https://comet.exemple.fr');
   });
 
-  it('admet la même origine derrière un relais (X-Forwarded-Host)', async () => {
+  it('ignore un Host relayé depuis un pair non approuvé', async () => {
     const r = await request(app).get('/api/health')
       .set('Host', 'localhost:4800').set('X-Forwarded-Host', 'comet.exemple.fr')
       .set('Origin', 'https://comet.exemple.fr');
-    expect(r.status).toBe(200);
+    expect(r.status).toBe(403);
   });
 
   it('refuse une origine étrangère', async () => {

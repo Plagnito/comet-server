@@ -22,7 +22,7 @@ describe('Inscription ouverte', () => {
 
   it('crée le compte et ouvre une session', async () => {
     const r = await request(app).post('/api/auth/register')
-      .send({ email, displayName: 'Nouveau Venu', password, publicKey: 'cle-publique', encPrivateKey: '{"salt":"s","iv":"i","data":"d"}' });
+      .send({ email, displayName: 'Nouveau Venu', password, bootstrapToken: process.env.COMET_BOOTSTRAP_TOKEN, publicKey: 'cle-publique', encPrivateKey: '{"salt":"s","iv":"i","data":"d"}' });
     expect(r.status).toBe(201);
     expect(r.body.token).toBeTruthy();
     expect(r.body.user.email).toBe(email);

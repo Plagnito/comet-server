@@ -7,12 +7,14 @@ services:
     container_name: comet
     restart: unless-stopped
     ports:
-      - "4800:4800"
+      - "127.0.0.1:4800:4800"
     volumes:
       - comet-donnees:/comet/server/data
     environment:
       # Adresse publique de votre serveur (liens de partage, pièces jointes volumineuses).
       # COMET_BASE_URL: https://comet.mon-domaine.fr
+      # Renseigner l'IP/CIDR REEL du proxy immédiat si les en-têtes relayés sont nécessaires :
+      # COMET_TRUST_PROXY: "<IP-du-proxy>/32"
       # Fermer les inscriptions une fois vos comptes créés :
       # COMET_INSCRIPTION: fermee
       COMET_INSCRIPTION: ouverte

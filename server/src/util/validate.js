@@ -24,6 +24,7 @@ export const registerSchema = z.object({
   displayName: z.string().max(80).optional(),
   password: z.string().min(1, 'requis').max(200),
   publicKey: z.string().max(8000).nullish(),
+  bootstrapToken: z.string().max(256).optional(),
 }).passthrough();
 
 export const loginSchema = z.object({

@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 
-import './config.js'; // valide JWT_SECRET au démarrage (refuse de démarrer si faible en prod)
+import { TRUST_PROXY } from './config.js'; // valide les secrets et les proxys au démarrage
 import { errorHandler } from './util/errors.js';
 import { purgeExpired, compacterJournalMail } from './db.js'; // initialise la base + le seed
 import { startUpdater, localCommit } from './services/updater.js';
@@ -49,19 +49,19 @@ import { demarrerPurge } from './services/remisedirecte.js';
 import federationRoutes, { wellKnown, entreServeurs } from './routes/federation.js';
 import { demarrerFile as demarrerFileFederation } from './federation/service.js';
 
-// Résilience : on journalise les erreurs non gérées sans abattre le serveur
-process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
-process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+// Un état potentiellement corrompu ne doit plus traiter de requêtes. Le
+// superviseur (Docker restart / systemd) prend en charge le redémarrage.
+const fatal = (kind) => (error) => { console.error(`[${kind}]`, error); process.exit(1); };
+process.on('uncaughtException', fatal('uncaughtException'));
+process.on('unhandledRejection', fatal('unhandledRejection'));
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 4800;
 const HOST = process.env.HOST || '0.0.0.0';
 
 const app = express();
-// 1 = on fait confiance à UN seul proxy (le tunnel Cloudflare / reverse-proxy).
-// `true` ferait confiance à toute la chaîne et laisserait un client falsifier
-// X-Forwarded-For (contournement du rate-limiting basé sur l'IP).
-app.set('trust proxy', 1);
+// Défaut : aucun proxy. Seules les IP/CIDR explicitement configurées sont fiables.
+app.set('trust proxy', TRUST_PROXY);
 
 // ── En-têtes de sécurité (helmet) ───────────────────────────────────────────
 // CSP désactivée ici : le front compilé (Vite) et les pages de callback OAuth
@@ -105,7 +105,10 @@ const allowedOrigins = new Set(
 // n'est pas dans la liste (COMET_BASE_URL oublié, autre port, autre nom) rend une page
 // BLANCHE. Comparer à l'en-tête Host est sûr : une page d'un autre site qui nous écrit
 // porte SON origine, pas la nôtre, et un navigateur ne la laisse pas falsifier.
-const hoteDemande = (req) => String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim().toLowerCase();
+const hoteDemande = (req) => {
+  const trusted = req.app.get('trust proxy fn')(req.socket.remoteAddress, 0);
+  return String((trusted && req.get('x-forwarded-host')) || req.get('host') || '').split(',')[0].trim().toLowerCase();
+};
 const memeOrigine = (origin, req) => {
   try { return new URL(origin).host.toLowerCase() === hoteDemande(req); } catch { return false; }
 };

@@ -75,11 +75,11 @@ export function AuthProvider({ children }) {
     setUser(r.user);
   };
 
-  const register = async (email, displayName, password) => {
+  const register = async (email, displayName, password, bootstrapToken) => {
     const kp = await generateKeyPair();
     const publicKey = await exportPublicKey(kp);
     const encPrivateKey = await wrapPrivateKey(kp, password);
-    const r = await api.post('/auth/register', { email, displayName, password, publicKey, encPrivateKey });
+    const r = await api.post('/auth/register', { email, displayName, password, publicKey, encPrivateKey, bootstrapToken });
     setToken(r.token);
     await cachePriv(kp.privateKey);
     setPrivateKey(kp.privateKey);

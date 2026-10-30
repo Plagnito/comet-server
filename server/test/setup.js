@@ -8,6 +8,7 @@ import { rmSync } from 'node:fs';
 process.env.NODE_ENV = 'test';
 // Secret de test : ≥ 32 caractères et hors liste interdite (cf. config.js).
 process.env.JWT_SECRET = 'test-secret-pour-vitest-0123456789abcdef';
+process.env.COMET_BOOTSTRAP_TOKEN = 'test-bootstrap-local-0123456789abcdef';
 // Comptes de démo (lea/marc/sophie) : désactivés en production (chacun arrive sans
 // org), mais REQUIS par la suite de tests d'intégration → réactivés ici uniquement.
 process.env.COMET_SEED_DEMO = '1';
