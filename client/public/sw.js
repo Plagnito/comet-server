@@ -3,7 +3,7 @@
 //   - navigations (HTML)  → network-first, repli sur la dernière coque en cache (hors-ligne)
 //   - /assets/* (hachés)  → cache-first (immuables, le nom change à chaque build)
 //   - /api, /ws           → JAMAIS interceptés (toujours le réseau)
-const CACHE = 'comet-shell-v1';
+const CACHE = 'comet-shell-v2';
 
 self.addEventListener('install', (e) => {
   self.skipWaiting();
