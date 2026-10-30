@@ -45,7 +45,7 @@ describe('POST /auth/reset-password', () => {
 
   it('refuse sans jeton (401)', async () => {
     const r = await request(app).post('/api/auth/reset-password')
-      .send({ newPassword: NEW_PW, publicKey: FAKE_PUB, encPrivateKey: FAKE_ENC, confirm: true });
+      .send({ newPassword: NEW_PW, publicKey: FAKE_PUB, encPrivateKey: FAKE_ENC, confirm: true, currentPassword: 'comet1234' });
     expect(r.status).toBe(401);
   });
 
@@ -55,7 +55,7 @@ describe('POST /auth/reset-password', () => {
 
     const r = await request(app).post('/api/auth/reset-password')
       .set('Authorization', `Bearer ${token}`)
-      .send({ newPassword: NEW_PW, publicKey: FAKE_PUB, encPrivateKey: FAKE_ENC, confirm: true });
+      .send({ newPassword: NEW_PW, publicKey: FAKE_PUB, encPrivateKey: FAKE_ENC, confirm: true, currentPassword: 'comet1234' });
     expect(r.status).toBe(200);
     expect(r.body.ok).toBe(true);
     expect(r.body.purged).toBeGreaterThan(0);

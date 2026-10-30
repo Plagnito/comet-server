@@ -1,11 +1,12 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { securityHeaders } from './security-headers.js';
+import { serveClient } from './services/client-files.js';
+import { requestHost } from './util/proxy.js';
 
 import { TRUST_PROXY } from './config.js'; // valide les secrets et les proxys au démarrage
 import { errorHandler } from './util/errors.js';
@@ -64,15 +65,8 @@ const app = express();
 app.set('trust proxy', TRUST_PROXY);
 
 // ── En-têtes de sécurité (helmet) ───────────────────────────────────────────
-// CSP désactivée ici : le front compilé (Vite) et les pages de callback OAuth
-// contiennent des scripts/styles inline ; une CSP stricte les casserait.
-// COOP « same-origin-allow-popups » : préserve window.opener pour les popups OAuth
-// (la page de callback fait window.opener.postMessage).
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
-}));
+// Scripts légitimes autorisés par nonce ; styles React et popups OAuth préservés.
+app.use(securityHeaders());
 
 // ── Fédération entre serveurs Comet ─────────────────────────────────────────
 // Avant CORS et avant express.json : l'identité publique se lit de partout, et les
@@ -105,12 +99,8 @@ const allowedOrigins = new Set(
 // n'est pas dans la liste (COMET_BASE_URL oublié, autre port, autre nom) rend une page
 // BLANCHE. Comparer à l'en-tête Host est sûr : une page d'un autre site qui nous écrit
 // porte SON origine, pas la nôtre, et un navigateur ne la laisse pas falsifier.
-const hoteDemande = (req) => {
-  const trusted = req.app.get('trust proxy fn')(req.socket.remoteAddress, 0);
-  return String((trusted && req.get('x-forwarded-host')) || req.get('host') || '').split(',')[0].trim().toLowerCase();
-};
 const memeOrigine = (origin, req) => {
-  try { return new URL(origin).host.toLowerCase() === hoteDemande(req); } catch { return false; }
+  try { return new URL(origin).host.toLowerCase() === requestHost(req); } catch { return false; }
 };
 app.use(
   cors((req, cb) => {
@@ -147,7 +137,8 @@ const authLimiter = rateLimit({
   skipSuccessfulRequests: true,
   message: { error: 'Trop de tentatives. Réessayez plus tard.' },
 });
-app.use(['/api/auth/login', '/api/auth/register', '/api/auth/2fa/verify'], authLimiter);
+app.use(['/api/auth/login', '/api/auth/register', '/api/auth/2fa/verify', '/api/auth/2fa/setup', '/api/auth/2fa/enable',
+  '/api/auth/2fa/disable', '/api/auth/reset-password', '/api/auth/set-password', '/api/auth/keys'], authLimiter);
 
 // Limiteur dédié sur l'échange de code d'appairage d'extension : empêche tout
 // brute-force du code (en plus de son entropie 128 bits et de son expiration).
@@ -209,13 +200,7 @@ app.use('/api/federation', federationRoutes);
 
 // Sert le front compilé en production (client/dist)
 const clientDist = join(__dirname, '..', '..', 'client', 'dist');
-if (existsSync(clientDist)) {
-  app.use(express.static(clientDist));
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/')) return next();
-    res.sendFile(join(clientDist, 'index.html'));
-  });
-}
+serveClient(app, clientDist);
 
 app.use(errorHandler);
 

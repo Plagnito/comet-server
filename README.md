@@ -131,7 +131,9 @@ Protocol details (in French): [`server/src/federation/PROTOCOLE.md`](server/src/
   rely on organisation management that does not exist in this edition yet: they are hidden.
 - **Between Comet servers**: no attachments, scheduled sending or disappearing messages yet
   (text, replies and copies work).
-- **Forgotten password**: no reset (see above).
+- **Forgotten password**: encrypted mail cannot be recovered. An already signed-in
+  user with a preconfigured authenticator or recovery code can replace the key and
+  erase their own mail. Without that independent factor, the current password is required.
 - **Language**: the interface is in French for now.
 
 ---
@@ -151,6 +153,36 @@ cd server && npm test
 ```
 
 Server: Node.js, Express, `node:sqlite`. Interface: React 18 and Vite. Desktop: Electron.
+
+## Browser sessions and security changes
+
+The browser keeps its session token and unlocked encryption key only in memory.
+Reloading or closing the app requires signing in again. The updated client removes
+legacy `comet.token` and `comet.privkey` entries from local and session storage on
+load; deploy the rebuilt client together with the server. Existing open windows
+need to reload to receive that migration. The encrypted private-key envelope stays
+on the server so the password can unlock it at the next login.
+
+Preparing or disabling MFA requires the current password and, when MFA is already
+enabled, its current TOTP or an unused recovery code. Preparation leaves the active
+factor unchanged. Activation proves the new code with a ten-minute enrollment grant.
+Recovery codes are consumed once across login and security changes. Five failed
+proofs lock that account's proof flow for fifteen minutes; MFA login and privileged
+changes use separate limits, in addition to the server's IP limit.
+
+Security changes revoke previous HTTP and WebSocket sessions and return a fresh
+session to the initiating client. API integrations must adopt the returned token.
+Password changes with an existing key require a newly wrapped private-key envelope;
+destructive reset requires an explicit confirmation, a new key pair and a fresh
+proof. Accounts without a chosen password cannot bootstrap one using only a bearer.
+An independent enrollment/recovery mechanism for those accounts is not included.
+
+Production HTML and OAuth callbacks use nonce-authorized scripts. The QR generator
+is bundled locally. Reverse proxies must preserve the matching CSP header and HTML
+and must not cache or rewrite the index independently. A cached offline shell keeps
+its original header/body pair; reconnect to receive updates. Inline React styles
+remain allowed. CSP and memory-only storage reduce exposure; they do not protect
+an unlocked session from every script that can execute in its page.
 
 ## License
 
