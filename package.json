@@ -1,0 +1,76 @@
+{
+  "name": "comet",
+  "version": "1.0.2",
+  "private": true,
+  "author": "Plagnito",
+  "description": "Comet — suite de productivité native (mail E2EE, calendrier, contacts, tâches, notes)",
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "build:client": "cd client && npm run build",
+    "app": "electron .",
+    "app:build": "npm run build:client && electron .",
+    "dist": "electron-builder",
+    "dist:publish": "electron-builder --publish always",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install",
+    "start": "cd server && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "webtorrent": "^2.8.5"
+  },
+  "build": {
+    "appId": "com.plagnito.comet-server",
+    "productName": "Comet",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "desktop/build"
+    },
+    "files": [
+      "desktop/**/*",
+      "package.json",
+      "!**/node_modules/{utp-native,fd-lock,bufferutil,utf-8-validate,node-datachannel}/**"
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "Plagnito",
+      "repo": "comet-server"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Comet-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity",
+      "artifactName": "Comet-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "artifactName": "Comet-${version}.${ext}",
+      "maintainer": "Plagnito"
+    }
+  }
+}

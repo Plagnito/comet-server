@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Comet — suite de productivité chiffrée</title>
+    <meta
+      name="description"
+      content="Comet est une suite de productivité auto-hébergeable : messagerie chiffrée de bout en bout, calendrier, contacts, tâches et notes."
+    />
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="author" content="Plagnito" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Comet" />
+    <meta property="og:title" content="Comet — suite de productivité chiffrée" />
+    <meta property="og:description" content="Messagerie chiffrée de bout en bout, calendrier, contacts, tâches et notes, sur votre propre serveur." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Comet" />
+    <script>
+      try {
+        var t = localStorage.getItem('comet.theme');
+        if (t) document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <div style="max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem; font-family: system-ui, sans-serif; line-height: 1.6">
+        <h1>Comet</h1>
+        <p>
+          <strong>Comet est une suite de productivité auto-hébergeable</strong>, créée par Plagnito :
+          messagerie chiffrée de bout en bout, messagerie d’équipe, conférence, calendrier,
+          contacts, tâches et notes.
+        </p>
+        <p>
+          Le code source est publié sur
+          <a href="https://github.com/Plagnito/comet-server">github.com/Plagnito/comet-server</a>.
+        </p>
+        <p><em>L’application a besoin de JavaScript pour fonctionner.</em></p>
+      </div>
+    </noscript>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

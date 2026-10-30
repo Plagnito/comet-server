@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+  <title>Comet — choisir le serveur</title>
+  <style>
+    :root { color-scheme: dark; --fond: #0b1120; --carte: #121a2e; --ligne: #263049; --texte: #e6e9f2; --doux: #9aa3b8; --accent: #5b6cff; --erreur: #f87171; --ok: #4ade80; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--fond); color: var(--texte); font: 14px/1.5 system-ui, "Segoe UI", sans-serif; }
+    .barre { height: 36px; display: flex; align-items: center; justify-content: flex-end; -webkit-app-region: drag; }
+    .barre button { -webkit-app-region: no-drag; width: 46px; height: 36px; border: 0; background: none; color: var(--doux); font-size: 15px; cursor: pointer; }
+    .barre button:hover { background: #1c2540; color: var(--texte); }
+    .barre button.fermer:hover { background: #c42b1c; color: #fff; }
+    main { min-height: calc(100% - 36px); display: grid; place-items: center; padding: 16px; }
+    .carte { width: 100%; max-width: 440px; background: var(--carte); border: 1px solid var(--ligne); border-radius: 14px; padding: 28px; }
+    .marque { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 17px; margin-bottom: 18px; }
+    .marque span { width: 28px; height: 28px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; color: #fff; }
+    h1 { font-size: 20px; margin: 0 0 6px; }
+    p { color: var(--doux); margin: 0 0 18px; }
+    label { display: block; font-size: 13px; color: var(--doux); margin-bottom: 6px; }
+    input { width: 100%; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--ligne); background: var(--fond); color: var(--texte); font: inherit; }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .actions { display: flex; gap: 8px; margin-top: 14px; }
+    button.principal, button.second { flex: 1; padding: 10px; border-radius: 9px; font: inherit; font-weight: 600; cursor: pointer; }
+    button.principal { border: 0; background: var(--accent); color: #fff; }
+    button.second { border: 1px solid var(--ligne); background: none; color: var(--texte); }
+    button:disabled { opacity: .55; cursor: default; }
+    .etat { min-height: 21px; margin-top: 12px; font-size: 13px; }
+    .etat.erreur { color: var(--erreur); }
+    .etat.ok { color: var(--ok); }
+    .aide { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--ligne); font-size: 12.5px; color: var(--doux); }
+    .retour { display: none; margin-top: 10px; background: none; border: 0; color: var(--doux); text-decoration: underline; cursor: pointer; font: inherit; font-size: 13px; padding: 0; }
+  </style>
+</head>
+<body>
+  <div class="barre">
+    <button id="reduire" title="Réduire" aria-label="Réduire">&#8211;</button>
+    <button id="fermer" class="fermer" title="Fermer" aria-label="Fermer">&#10005;</button>
+  </div>
+  <main>
+    <form class="carte" id="formulaire">
+      <div class="marque"><span>&#10022;</span> Comet</div>
+      <h1>Choisir votre serveur</h1>
+      <p>Comet se connecte au serveur de votre choix : celui de votre organisation, d'un proche, ou le vôtre.</p>
+      <label for="adresse">Adresse du serveur</label>
+      <input id="adresse" placeholder="comet.mon-domaine.fr" autocomplete="url" spellcheck="false" autofocus />
+      <div class="actions">
+        <button type="button" class="second" id="tester">Tester</button>
+        <button type="submit" class="principal" id="utiliser">Se connecter</button>
+      </div>
+      <div class="etat" id="etat" role="status"></div>
+      <button type="button" class="retour" id="retour">Revenir au serveur actuel</button>
+      <div class="aide">
+        L'adresse est vérifiée avant d'être retenue : elle doit répondre comme un serveur Comet,
+        en <b>https</b> (le http n'est accepté que sur le réseau local). Vous pourrez en changer
+        plus tard dans Paramètres.
+      </div>
+    </form>
+  </main>
+  <script>
+    const bureau = window.cometDesktop;
+    const $ = (id) => document.getElementById(id);
+    const etat = (texte, genre) => { $('etat').textContent = texte; $('etat').className = 'etat ' + (genre || ''); };
+    const occupe = (oui) => { $('tester').disabled = oui; $('utiliser').disabled = oui; };
+
+    $('reduire').onclick = () => bureau?.windowControls?.minimize();
+    $('fermer').onclick = () => bureau?.windowControls?.close();
+
+    let actuel = '';
+    bureau?.serveur?.get().then((s) => {
+      actuel = s?.actuel || '';
+      if (actuel) { $('adresse').value = actuel; $('retour').style.display = 'inline'; }
+    }).catch(() => {});
+    $('retour').onclick = () => { if (actuel) location.href = actuel; };
+
+    $('tester').onclick = async () => {
+      occupe(true); etat('Vérification…');
+      const r = await bureau.serveur.tester($('adresse').value).catch(() => ({ ok: false, raison: 'Vérification impossible.' }));
+      occupe(false);
+      etat(r.ok ? `Serveur Comet trouvé : ${r.origine}` : r.raison, r.ok ? 'ok' : 'erreur');
+    };
+
+    $('formulaire').onsubmit = async (e) => {
+      e.preventDefault();
+      occupe(true); etat('Connexion…');
+      const r = await bureau.serveur.utiliser($('adresse').value).catch(() => ({ ok: false, raison: 'Connexion impossible.' }));
+      // En cas de succès, la fenêtre charge déjà le serveur : rien d'autre à faire ici.
+      if (!r.ok) { occupe(false); etat(r.raison, 'erreur'); }
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Démarrer :            docker compose up -d
+# Voir les journaux :   docker compose logs -f
+# Mettre à jour :       git pull && docker compose up -d --build
+services:
+  comet:
+    build: .
+    container_name: comet
+    restart: unless-stopped
+    ports:
+      - "4800:4800"
+    volumes:
+      - comet-donnees:/comet/server/data
+    environment:
+      # Adresse publique de votre serveur (liens de partage, pièces jointes volumineuses).
+      # COMET_BASE_URL: https://comet.mon-domaine.fr
+      # Fermer les inscriptions une fois vos comptes créés :
+      # COMET_INSCRIPTION: fermee
+      COMET_INSCRIPTION: ouverte
+volumes:
+  comet-donnees:

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; width: 290px; padding: 16px; margin: 0; color: #0f172a; }
+    h1 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 7px; }
+    h1 .mark { width: 22px; height: 22px; border-radius: 6px; background: #4f46e5; color: #fff; display: grid; place-items: center; font-size: 13px; }
+    input { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #e2e8f0; border-radius: 8px; margin: 5px 0; font-size: 13px; }
+    button { width: 100%; padding: 9px; border: none; border-radius: 8px; background: #4f46e5; color: #fff; font-weight: 600; cursor: pointer; margin-top: 8px; font-size: 13px; }
+    button.ghost { background: #f1f5f9; color: #0f172a; }
+    .muted { color: #64748b; font-size: 12px; line-height: 1.5; }
+    .ok { color: #16a34a; font-weight: 600; }
+    .err { color: #e11d48; font-size: 12px; margin-top: 8px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; }
+    .row input { width: auto; margin: 0; }
+  </style>
+</head>
+<body>
+  <h1><span class="mark">✦</span> Comet</h1>
+  <div id="connected" style="display:none">
+    <div class="muted">Connecté en tant que <span class="ok" id="email"></span></div>
+    <label class="row"><input type="checkbox" id="enabled" /> Enregistrer automatiquement les mots de passe</label>
+    <div class="muted">Ouvrez le coffre-fort de Comet pour importer les mots de passe capturés.</div>
+    <button class="ghost" id="disconnect">Déconnecter</button>
+  </div>
+  <div id="setup">
+    <div class="muted">Dans Comet : <b>Paramètres → Options avancées → Extension</b>, puis « Générer un code d'appairage ».</div>
+    <input id="server" placeholder="https://comet.votre-domaine.fr" />
+    <input id="code" placeholder="Code d'appairage (à copier depuis Comet)" />
+    <button id="connect">Connecter</button>
+    <div class="err" id="err"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
