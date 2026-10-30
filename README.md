@@ -1,21 +1,29 @@
-# Comet — serveur auto-hébergeable
+# Comet — a self-hosted, end-to-end encrypted productivity suite
 
-Comet est une suite de productivité **chiffrée de bout en bout** que vous installez
-sur votre propre serveur : courrier, messagerie d'équipe, conférence, calendrier,
-contacts, tâches, tableau, pipelines, notes et coffre-fort. Vos comptes, vos données et
-vos clés restent chez vous.
+*English · [Français](README.fr.md)*
 
-On l'utilise depuis un navigateur, ou depuis l'application de bureau (Windows, macOS,
-Linux), qui se connecte au serveur de votre choix.
+Comet puts mail, team chat, video calls, a calendar, contacts, tasks, boards, pipelines,
+notes and a password vault in one server **you** run. Content is **encrypted end to end**:
+it is encrypted on your device, and the server stores and relays data it cannot read. Your
+accounts, your data and your keys stay with you.
+
+Use it from any browser, or from the desktop app (Windows, macOS, Linux), which connects to
+the server of your choice.
+
+![Comet inbox](captures/courrier.png)
+
+| Calendar | Password vault |
+|---|---|
+| ![Calendar](captures/calendrier.png) | ![Vault](captures/coffre.png) |
 
 ---
 
-## Installer un serveur
+## Install a server
 
-### Avec Docker (le plus simple)
+### With Docker (simplest)
 
-Il faut une machine allumée en permanence (un PC, un Raspberry Pi, un petit serveur
-loué) avec [Docker](https://docs.docker.com/get-docker/).
+You need a machine that stays on (a PC, a Raspberry Pi, a small rented server) with
+[Docker](https://docs.docker.com/get-docker/).
 
 ```bash
 git clone https://github.com/Plagnito/comet-server.git
@@ -23,103 +31,125 @@ cd comet-server
 docker compose up -d
 ```
 
-Ouvrez **http://adresse-de-la-machine:4800** et créez votre compte. **Le premier compte
-créé devient administrateur.** C'est tout : la base de données, les pièces jointes et le
-secret de session sont créés au premier démarrage et rangés dans un volume Docker, qui
-survit aux mises à jour.
+Open **http://your-machine:4800** and create your account. **The first account created
+becomes the administrator.** That's it: the database, attachment storage and session secret
+are created on first start and kept in a Docker volume that survives updates.
 
-Une fois vos comptes créés, fermez les inscriptions dans `docker-compose.yml`
-(`COMET_INSCRIPTION: fermee`), puis `docker compose up -d`.
+Once your accounts exist, close sign-ups in `docker-compose.yml`
+(`COMET_INSCRIPTION: fermee`), then run `docker compose up -d` again.
 
-Mettre à jour :
+Update:
 
 ```bash
 git pull && docker compose up -d --build
 ```
 
-### Rendre le serveur joignable depuis Internet
+### Reach your server from the Internet
 
-Le serveur écoute en HTTP sur le port 4800. Pour s'y connecter de partout, il lui faut
-une adresse en **HTTPS**. Deux façons courantes :
+The server speaks plain HTTP on port 4800. To use it from anywhere it needs an **HTTPS**
+address (browsers only allow the encryption APIs on secure origins). Two common options:
 
-- **Tunnel Cloudflare** (aucun port à ouvrir sur votre box) : avec un nom de domaine
-  géré par Cloudflare, `cloudflared tunnel` relie `https://comet.mon-domaine.fr` à
-  `http://localhost:4800`.
-- **Relais inverse** (Caddy, nginx) devant le port 4800, qui obtient le certificat
-  HTTPS tout seul (Caddy : une ligne, `comet.mon-domaine.fr { reverse_proxy localhost:4800 }`).
+- **Cloudflare Tunnel** (no port to open on your router): with a domain managed by
+  Cloudflare, `cloudflared tunnel` maps `https://comet.example.com` to `http://localhost:4800`.
+- **A reverse proxy** (Caddy, nginx) in front of port 4800 that obtains the certificate by
+  itself (Caddy, one line: `comet.example.com { reverse_proxy localhost:4800 }`).
 
-Renseignez ensuite cette adresse dans `COMET_BASE_URL` (liens de partage, pièces jointes
-volumineuses, connexion Gmail/Outlook).
+Then put that address in `COMET_BASE_URL` (share links, large attachments, Gmail/Outlook
+sign-in).
 
-### Sans Docker
+### Without Docker
 
-Il faut **Node.js 25 ou plus récent** (Comet utilise la base SQLite intégrée à Node).
+You need **Node.js 25 or newer** (Comet uses Node's built-in SQLite).
 
 ```bash
 cd client && npm ci && npm run build && cd ..
 cd server && npm ci --omit=dev
-cp .env.example .env      # puis renseignez au moins JWT_SECRET
+cp .env.example .env      # then set at least JWT_SECRET
 npm start
 ```
 
 ---
 
-## L'application de bureau
+## The desktop app
 
-Au premier lancement, elle demande l'adresse de votre serveur, vérifie qu'il s'agit bien
-d'un serveur Comet, puis la retient. On en change dans **Paramètres → Serveur**. Le HTTPS
-est exigé, sauf sur le réseau local.
+On first launch it asks for your server's address, checks that it really is a Comet server,
+and remembers it. Change it later in **Settings → Server**. HTTPS is required except on the
+local network.
 
-Pour l'instant, l'application se compile depuis ce dépôt : `npm install` à la racine,
-puis `npm run dist` (installateurs dans `release/`).
+For now the app is built from this repository: `npm install` at the root, then
+`npm run dist` (installers land in `release/`).
 
 ---
 
-## Ce qui est chiffré, et ce qui ne l'est pas
+## What is encrypted, and what is not
 
-- Les messages échangés **entre comptes d'un même serveur** sont chiffrés de bout en bout :
-  le serveur stocke du contenu qu'il ne peut pas lire.
-- Votre **mot de passe est aussi votre clé de chiffrement**. S'il est perdu, le courrier
-  chiffré l'est avec lui : aucun administrateur ne peut le récupérer. C'est le prix d'un
-  serveur qui ne peut pas lire ce qu'il garde.
-- Le courrier venu de l'extérieur (un compte Gmail ou Outlook relié à Comet) arrive en
-  clair du réseau, comme partout ailleurs. Comet le signale sur chaque message concerné.
-- Les fichiers de plus de 50 Mo sont transmis **non chiffrés** (hébergés par le serveur et
-  partagés en torrent web-seed). L'interface prévient avant l'envoi.
+- Messages **between Comet accounts** — on the same server or on another Comet server
+  (federation, below) — are end-to-end encrypted: servers store and carry content they
+  cannot read.
+- **Your password is also your encryption key.** If it is lost, your encrypted mail is lost
+  with it: no administrator can recover it. That is the price of a server that cannot read
+  what it keeps.
+- Mail from outside (a Gmail or Outlook account linked to Comet) arrives in clear text from
+  the network, as it does everywhere else. Comet flags every such message.
+- Files larger than 50 MB are sent **unencrypted** (hosted by the server and shared as a
+  web-seeded torrent). The interface warns you before sending.
 
-## Ce que cette édition ne fait pas encore
+## Writing to other Comet servers (federation)
 
-- **Les outils d'organisation** (annuaire d'entreprise, projets, objectifs, suivi du temps,
-  rapports) supposent une gestion des organisations qui n'existe pas encore ici : ils sont
-  masqués.
-- **Deux serveurs Comet ne communiquent pas encore entre eux.** Un compte écrit aux autres
-  comptes de son serveur, et au reste du monde via un compte mail relié (Gmail, Outlook,
-  IMAP/SMTP). La fédération entre serveurs, chiffrée et sans intermédiaire, est la
-  prochaine étape.
-- **Mot de passe oublié** : pas de réinitialisation (voir plus haut).
+Set `COMET_DOMAINE=comet.example.com`: your accounts become reachable from any other Comet
+server as `name@comet.example.com`, and the other way round.
+
+- **Direct, no middleman**: your server delivers to the recipient's server, which it finds
+  at `https://<domain>/.well-known/comet`. There is no central service.
+- **End-to-end encrypted**: your app fetches the recipient's key from *their* server, which
+  vouches for it with a signature that the app verifies itself. Neither server can read the
+  message.
+- **Servers recognise each other**: each has an identity key (Ed25519) and signs every
+  request. A server's key is remembered on first contact; if it changes without proof signed
+  by the old key, exchanges are paused until the administrator compares fingerprints
+  (Administration page).
+- **Safeguards**: replay protection (date and nonce), per-server rate limits, a block list,
+  a maximum size, HTTPS required outside the local network, no redirects followed.
+- **Safety number**: on a message from another server, "Safety number" shows 60 digits that
+  are identical on both sides. Compare them out loud: if they differ, a key was swapped.
+
+What federation does not hide: both servers see **who writes to whom, when, and the size**
+of messages (as with email). Until the safety number has been compared, first contact relies
+on the remote server's HTTPS certificate.
+
+Protocol details (in French): [`server/src/federation/PROTOCOLE.md`](server/src/federation/PROTOCOLE.md).
+
+## Not there yet
+
+- **Organisation tools** (company directory, projects, objectives, time tracking, reports)
+  rely on organisation management that does not exist in this edition yet: they are hidden.
+- **Between Comet servers**: no attachments, scheduled sending or disappearing messages yet
+  (text, replies and copies work).
+- **Forgotten password**: no reset (see above).
+- **Language**: the interface is in French for now.
 
 ---
 
 ## Configuration
 
-Tout est décrit dans [`server/.env.example`](server/.env.example) : inscriptions, adresse
-publique, comptes Gmail/Outlook en un clic, serveur TURN pour la visio à travers Internet,
-notifications bureau. Rien n'est obligatoire avec Docker.
+Everything is described in [`server/.env.example`](server/.env.example): sign-ups, public
+address, one-click Gmail/Outlook accounts, a TURN server for video across the Internet,
+desktop notifications. With Docker nothing is mandatory.
 
-## Développement
+## Development
 
 ```bash
-npm run install:all   # dépendances racine, serveur et client
-npm run dev           # serveur (4800) + interface Vite (5174)
+npm run install:all   # root, server and client dependencies
+npm run dev           # server (4800) + Vite UI (5174)
 cd server && npm test
 ```
 
-Serveur : Node.js, Express, `node:sqlite`. Interface : React 18 et Vite. Bureau : Electron.
+Server: Node.js, Express, `node:sqlite`. Interface: React 18 and Vite. Desktop: Electron.
 
-## Licence
+## License
 
-Comet est publié sous **GNU AGPL v3** (voir [`LICENSE`](LICENSE)). Vous pouvez l'utiliser,
-le modifier et l'héberger librement ; si vous proposez une version modifiée à d'autres
-personnes à travers un réseau, vous devez leur en donner le code source.
+Comet is released under the **GNU AGPL v3** (see [`LICENSE`](LICENSE)). You may use, modify
+and host it freely; if you offer a modified version to other people over a network, you must
+give them its source code.
 
-Créé par Plagnito.
+Created by Plagnito.

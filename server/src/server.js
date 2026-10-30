@@ -46,6 +46,8 @@ import { startOutboxSender } from './services/outbox.js';
 import { startScheduledSender } from './services/scheduled.js';
 import { startSnoozeWaker } from './services/snooze.js';
 import { demarrerPurge } from './services/remisedirecte.js';
+import federationRoutes, { wellKnown, entreServeurs } from './routes/federation.js';
+import { demarrerFile as demarrerFileFederation } from './federation/service.js';
 
 // Résilience : on journalise les erreurs non gérées sans abattre le serveur
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
@@ -71,6 +73,12 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
 }));
+
+// ── Fédération entre serveurs Comet ─────────────────────────────────────────
+// Avant CORS et avant express.json : l'identité publique se lit de partout, et les
+// requêtes entre serveurs sont signées sur leur corps BRUT (cf. routes/federation.js).
+app.get('/.well-known/comet', wellKnown);
+app.use('/api/federation/v1', entreServeurs);
 
 // ── CORS restreint à une liste blanche d'origines ───────────────────────────
 // Le front est servi en same-origin (donc non concerné) et l'app de bureau charge
@@ -194,6 +202,7 @@ app.use('/api/conf', confRoutes);
 app.use('/api/appareils', appareilRoutes);
 app.use('/api/templates', templateRoutes);
 app.use('/api/groups', groupRoutes);
+app.use('/api/federation', federationRoutes);
 
 // Sert le front compilé en production (client/dist)
 const clientDist = join(__dirname, '..', '..', 'client', 'dist');
@@ -249,6 +258,8 @@ if (isMain) {
   startScheduledSender();
   // Réveil des messages reportés (snooze)
   startSnoozeWaker();
+  // File d'envoi vers les autres serveurs Comet (no-op sans COMET_DOMAINE)
+  demarrerFileFederation();
 
   const server = app.listen(PORT, HOST, () => {
     console.log(`✦ Comet → http://${HOST}:${PORT}`);

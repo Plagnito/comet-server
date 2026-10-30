@@ -2,10 +2,19 @@ import { Router } from 'express';
 import { db } from '../db.js';
 import { authRequired, publicUser } from '../auth.js';
 import { isOnline } from '../ws.js';
+import { versAdresseInterne, decouper, estDomaineDistant } from '../federation/config.js';
+import { resoudreDistants } from '../federation/service.js';
 
 const router = Router();
 
-const norm = (e) => { let v = String(e || '').trim().toLowerCase(); if (v && !v.includes('@')) v = `${v}@comet.mail`; return v; };
+const norm0 = (e) => { let v = String(e || '').trim().toLowerCase(); if (v && !v.includes('@')) v = `${v}@comet.mail`; return v; };
+// Une adresse au nom de NOTRE domaine fédéré désigne le compte local : l'adresse exacte
+// si un compte la porte, sinon « x@comet.mail ».
+const norm = (e) => {
+  const v = norm0(e);
+  if (!v || db.prepare('SELECT 1 FROM users WHERE email = ?').get(v)) return v;
+  return versAdresseInterne(v);
+};
 
 // Annuaire interne (hors comptes système) — composition / autocomplétion
 router.get('/', authRequired, (req, res) => {
@@ -43,11 +52,7 @@ router.get('/recent-recipients', authRequired, (req, res) => {
 
 // Clés publiques par adresse (pour chiffrer un message côté client)
 router.get('/keys', authRequired, (req, res) => {
-  const emails = String(req.query.emails || '').split(',').map((e) => {
-    let v = e.trim().toLowerCase();
-    if (v && !v.includes('@')) v = `${v}@comet.mail`;
-    return v;
-  }).filter(Boolean);
+  const emails = String(req.query.emails || '').split(',').map(norm).filter(Boolean);
 
   const keys = {};
   for (const email of emails) {
@@ -63,11 +68,17 @@ router.get('/keys', authRequired, (req, res) => {
 });
 
 // Résolution complète des destinataires (étend listes + alias) → { email, publicKey, online }
-router.get('/recipients', authRequired, (req, res) => {
+router.get('/recipients', authRequired, async (req, res, next) => {
   const inputs = String(req.query.emails || '').split(',').map(norm).filter(Boolean);
   const recipients = new Map(); // email -> { pk, id }
   const unknown = [];
+  const distants = []; // adresses d'autres serveurs Comet (même déjà connues : clé à revérifier)
   for (const email of inputs) {
+    const p = decouper(email);
+    if (p && estDomaineDistant(p.domaine)) {
+      const local = db.prepare('SELECT distant_domaine FROM users WHERE email = ?').get(email);
+      if (!local || local.distant_domaine) { distants.push(email); continue; }
+    }
     const g = db.prepare('SELECT id FROM groups WHERE group_email = ?').get(email);
     if (g) {
       const members = db.prepare('SELECT u.id, u.email, u.public_key AS pk FROM group_members gm JOIN users u ON u.id = gm.member_id WHERE gm.group_id = ?').all(g.id);
@@ -83,9 +94,20 @@ router.get('/recipients', authRequired, (req, res) => {
     }
     unknown.push(email);
   }
+  // Fédération : on demande la clé au serveur du destinataire (requête signée). Ce qui n'y
+  // est pas Comet reste « unknown » (envoi externe habituel) ; ce qui y est Comet mais
+  // injoignable, bloqué ou à la clé douteuse part dans `federationErrors` — jamais en clair.
+  let fed = { trouves: [], inconnus: [], erreurs: [] };
+  if (distants.length) {
+    try { fed = await resoudreDistants(distants); } catch (e) { return next(e); }
+  }
   res.json({
-    recipients: [...recipients].map(([email, v]) => ({ email, publicKey: v.pk, online: isOnline(v.id) })),
-    unknown,
+    recipients: [
+      ...[...recipients].map(([email, v]) => ({ email, publicKey: v.pk, online: isOnline(v.id) })),
+      ...fed.trouves,
+    ],
+    unknown: [...unknown, ...fed.inconnus],
+    federationErrors: fed.erreurs,
   });
 });
 

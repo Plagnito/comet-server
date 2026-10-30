@@ -305,6 +305,8 @@ svg { display: block; flex-shrink: 0; }
 .verified { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600; color: #16a34a; background: color-mix(in srgb, #16a34a 12%, transparent); padding: 1px 7px 1px 5px; border-radius: 20px; }
 .vault-field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
 .vault-field span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Note d'une entrée du coffre. Pas « .cc » : c'est la classe du bouton rond de la visio. */
+.vault-note { font-size: 12.5px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------- Pipelines ---------- */
 .pipe-tabs { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; }

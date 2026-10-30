@@ -6,6 +6,7 @@ import { requestFile, decryptAttachment } from '../p2p.js';
 import { Avatar } from '../components/shell-meta.jsx';
 import Icon from '../components/Icon.jsx';
 import MailHtmlView from '../components/MailHtmlView.jsx';
+import VerificationFederee from '../components/VerificationFederee.jsx';
 import ExtMail from './ExtMail.jsx';
 import SharedMail from './SharedMail.jsx';
 
@@ -368,12 +369,17 @@ export default function Mail({ query, reloadKey, counts, openCompose, onChanged,
                 </div>
                 <div className="d">{fmtDate(detail.sentAt)}</div>
               </div>
+              <VerificationFederee personne={detail.from} />
               {(detail.to.length > 0 || detail.cc.length > 0) && (
                 <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {detail.to.map((p) => <span key={'t' + p.id} className="chip"><Avatar name={p.displayName} color={p.avatarColor} size={18} />{p.displayName}</span>)}
                   {detail.cc.map((p) => <span key={'c' + p.id} className="chip"><span className="lead">Cc</span><Avatar name={p.displayName} color={p.avatarColor} size={18} />{p.displayName}</span>)}
                 </div>
               )}
+              {/* Destinataires d'autres serveurs Comet (dossier Envoyés) : même numéro de sécurité. */}
+              {[...detail.to, ...detail.cc].filter((p) => p.federe && p.id !== detail.from?.id).map((p) => (
+                <div key={'f' + p.id} style={{ marginTop: 6, fontSize: 12 }}>{p.email} <VerificationFederee personne={p} /></div>
+              ))}
             </div>
 
             <div className="reader-actions">

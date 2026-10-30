@@ -103,7 +103,9 @@ router.post('/login', validateBody(loginSchema), (req, res) => {
   if (!email) return res.status(400).json({ error: 'Adresse e-mail invalide' });
 
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  if (!user || !verifyPassword(password, user.password_hash)) {
+  // Un correspondant d'un AUTRE serveur Comet est une ligne `users` sans mot de passe :
+  // jamais de connexion, même si un hash venait à y être écrit.
+  if (!user || user.distant_domaine || !verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'Identifiants incorrects' });
   }
   if (user.totp_enabled) {

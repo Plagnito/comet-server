@@ -5,6 +5,7 @@ import { encryptMessage, normalizeEmail } from '../crypto.js';
 import { offerFile, newTransferId, newFileKey, encryptAttachment } from '../p2p.js';
 import { sendMail } from '../outbox.js';
 import { stripImageMetadata } from '../images.js';
+import { verifierDestinatairesFederes } from '../federation.js';
 import Icon from './Icon.jsx';
 
 const MAX_FILE = 50 * 1024 * 1024; // 50 Mo
@@ -74,6 +75,8 @@ export default function Compose({ init = {}, onClose, onSent, onDeferredSend }) 
   useEffect(() => { api.get('/users/recent-recipients').then((r) => setRecent(r.recipients || [])).catch(() => {}); }, []);
   useEffect(() => { api.get('/accounts').then((r) => setExtAccounts((r.accounts || []).filter((a) => a.enabled))).catch(() => {}); }, []);
   useEffect(() => { api.get('/aliases').then((r) => setAliases((r.aliases || []).filter((a) => a.active))).catch(() => {}); }, []);
+  const [fedEtat, setFedEtat] = useState({ active: false }); // fédération entre serveurs Comet
+  useEffect(() => { api.get('/federation/etat').then(setFedEtat).catch(() => {}); }, []);
 
   function addRecipient(email) {
     const list = splitAddr(to);
@@ -124,6 +127,23 @@ export default function Compose({ init = {}, onClose, onSent, onDeferredSend }) 
       const toEmails = toRes.recipients.map((r) => r.email);
       const ccEmails = ccRes.recipients.map((r) => r.email);
       const hasInternal = toEmails.length + ccEmails.length > 0;
+
+      // ── Autres serveurs Comet (fédération) ───────────────────────────────
+      // Un serveur Comet existe pour ces adresses mais l'échange est impossible (bloqué,
+      // injoignable, clé douteuse) : on s'arrête. Surtout pas de repli en clair.
+      const fedErrors = [...(toRes.federationErrors || []), ...(ccRes.federationErrors || [])];
+      if (fedErrors.length) { setMsg(fedErrors.map((e) => `${e.adresse} : ${e.raison}`).join(' · ')); setBusy(false); return; }
+      const federes = [...toRes.recipients, ...ccRes.recipients].filter((r) => r.federe);
+      if (federes.length) {
+        if (files.length || schedule !== 'off' || eph !== 'off') {
+          setMsg('Vers un autre serveur Comet : texte chiffré uniquement pour l’instant (ni pièce jointe, ni programmation, ni autodestruction).');
+          setBusy(false); return;
+        }
+        // Attestation de chaque clé par le serveur du destinataire, vérifiée sur l'appareil.
+        const verif = await verifierDestinatairesFederes(federes);
+        if (verif.erreurs.length) { setMsg(verif.erreurs.join(' · ')); setBusy(false); return; }
+        if (verif.avertissements.length && !window.confirm(`${verif.avertissements.join('\n\n')}\n\nEnvoyer quand même ?`)) { setBusy(false); return; }
+      }
 
       // Destinataires non Comet → routés via un compte mail connecté (SMTP).
       const externalTo = toRes.unknown.filter(isExternalAddr);
@@ -403,6 +423,7 @@ export default function Compose({ init = {}, onClose, onSent, onDeferredSend }) 
         {typedExternal.length > 0 && (
           <div className="hint" style={{ margin: '2px 14px 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
             <Icon name="mail" size={13} style={{ flexShrink: 0, color: extAccounts.length ? 'var(--accent)' : 'var(--danger)' }} />
+            {fedEtat.active && <span>Sur un autre serveur Comet, le message part chiffré de bout en bout ; sinon : </span>}
             {relaisSortant.configured && (relaisSortant.addresses.includes(from) || extAccounts.length === 0)
               ? <span>Envoi depuis <b>{relaisSortant.addresses.includes(from) ? from : relaisSortant.addresses[0]}</b> via le relais d'envoi (non chiffré de bout en bout).</span>
               : extAccounts.length === 0

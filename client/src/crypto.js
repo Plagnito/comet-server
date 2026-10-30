@@ -146,3 +146,51 @@ export async function decryptMessage(ciphertext, iv, encKey, privateKey) {
   const pt = await subtle.decrypt({ name: 'AES-GCM', iv: ub64(iv) }, aes, ub64(ciphertext));
   return JSON.parse(td.decode(pt));
 }
+
+// ── Fédération entre serveurs Comet ──────────────────────────────────────────
+// La clé d'un correspondant d'un AUTRE serveur arrive avec une attestation signée (Ed25519)
+// par SON serveur. On la vérifie ici, sur l'appareil : notre propre serveur la relaie mais
+// ne peut pas la remplacer sans forger cette signature.
+const texteCle = ({ adresse, cle, date }) => ['comet-cle-v1', String(adresse).toLowerCase(), cle, date].join('\n');
+const texteRotation = ({ domaine, nouvelle, date }) => ['comet-rotation-v1', String(domaine).toLowerCase(), nouvelle, date].join('\n');
+
+async function verifierEd25519(cleB64, texte, signatureB64) {
+  try {
+    const cle = await subtle.importKey('spki', ub64(cleB64), { name: 'Ed25519' }, false, ['verify']);
+    return await subtle.verify({ name: 'Ed25519' }, cle, ub64(signatureB64), te.encode(texte));
+  } catch {
+    return false;
+  }
+}
+
+export const verifierEnregistrementCle = (enr, cleServeurB64) =>
+  verifierEd25519(cleServeurB64, texteCle(enr), enr.signature);
+
+export const verifierRotationServeur = (domaine, ancienne, nouvelle, rotation) =>
+  !!rotation && rotation.ancienne === ancienne && typeof rotation.date === 'string'
+    ? verifierEd25519(ancienne, texteRotation({ domaine, nouvelle, date: rotation.date }), rotation.signature)
+    : Promise.resolve(false);
+
+// Numéro de sécurité de deux correspondants (60 chiffres, 12 groupes de 5). Chacun apporte
+// 30 chiffres tirés de SA clé et de SON adresse (SHA-512 itéré, à la manière de Signal) ;
+// les deux moitiés sont rangées dans un ordre fixe, si bien que les deux personnes voient
+// EXACTEMENT le même numéro et peuvent le comparer de vive voix.
+async function moitie(adresse, cleB64) {
+  const ver = new Uint8Array([0, 0]);
+  const cle = ub64(cleB64);
+  const id = te.encode(String(adresse).toLowerCase());
+  let h = new Uint8Array([...ver, ...cle, ...id]);
+  for (let i = 0; i < 5200; i++) h = new Uint8Array(await subtle.digest('SHA-512', new Uint8Array([...h, ...cle])));
+  let s = '';
+  for (let i = 0; i < 30; i += 5) {
+    const n = ((h[i] * 2 ** 32) + ((h[i + 1] << 24) >>> 0) + (h[i + 2] << 16) + (h[i + 3] << 8) + h[i + 4]) % 100000;
+    s += String(n).padStart(5, '0');
+  }
+  return s;
+}
+
+export async function numeroDeSecurite(adresseA, cleA, adresseB, cleB) {
+  if (!cleA || !cleB) return null;
+  const [a, b] = await Promise.all([moitie(adresseA, cleA), moitie(adresseB, cleB)]);
+  return (a < b ? a + b : b + a).match(/.{5}/g).join(' ');
+}

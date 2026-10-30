@@ -81,7 +81,7 @@ export default function Vault({ query }) {
               </div>
             )}
             {e.url && <a className="ce" href={e.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{e.url}</a>}
-            {e.notes && <div className="cc" style={{ whiteSpace: 'pre-wrap' }}>{e.notes}</div>}
+            {e.notes && <div className="vault-note">{e.notes}</div>}
           </div>
         ))}
       </div>

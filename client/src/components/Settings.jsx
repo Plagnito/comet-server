@@ -41,6 +41,8 @@ export default function Settings({ onClose, onAccountsChanged }) {
   const [fp, setFp] = useState('');
 
   useEffect(() => { keyFingerprint(myPublicKey).then(setFp); }, [myPublicKey]);
+  const [fedEtat, setFedEtat] = useState(null); // fédération entre serveurs Comet
+  useEffect(() => { api.get('/federation/etat').then(setFedEtat).catch(() => {}); }, []);
 
   async function enablePIN() {
     setPinErr('');
@@ -386,6 +388,19 @@ export default function Settings({ onClose, onAccountsChanged }) {
           <div className="setting-desc">Comparez ce nombre avec vos correspondants (par un autre canal) pour vérifier qu'aucune clé n'a été substituée (anti-MITM).</div>
           <div className="secret-box" style={{ fontSize: 15, letterSpacing: 1 }}>{fp}</div>
         </div>
+
+        {/* Fédération : joignable depuis les autres serveurs Comet */}
+        {fedEtat?.active && (
+          <div className="ss-section ss-federation" style={{ marginTop: 20 }}>
+            <div className="setting-title" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><Icon name="mail" size={16} /> Autres serveurs Comet</div>
+            {fedEtat.adresse
+              ? <div className="setting-desc">Depuis un autre serveur Comet, on vous écrit à <b>{fedEtat.adresse}</b> — chiffré de bout en bout, livré directement de serveur à serveur, sans intermédiaire.</div>
+              : <div className="setting-desc">Votre adresse n'est pas joignable depuis les autres serveurs Comet (seuls les comptes en @comet.mail ou @{fedEtat.domaine} le sont).</div>}
+            <div className="setting-desc" style={{ marginTop: 8 }}>Empreinte de ce serveur ({fedEtat.domaine}) — celle que les autres serveurs mémorisent :</div>
+            <div className="secret-box" style={{ fontSize: 14, letterSpacing: 1 }}>{fedEtat.empreinteServeur}</div>
+          </div>
+        )}
+        {fedEtat?.erreur && <div className="hint" style={{ color: 'var(--danger)', marginTop: 8 }}>Fédération indisponible : {fedEtat.erreur}</div>}
 
         {/* Tableau de bord confidentialité */}
         <div className="ss-section ss-confidentialite" style={{ marginTop: 20 }}>

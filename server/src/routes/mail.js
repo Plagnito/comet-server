@@ -3,6 +3,9 @@ import { Router } from 'express';
 import { db } from '../db.js';
 import { authRequired } from '../auth.js';
 import { deliverMessage } from '../services/mail.js';
+import { versAdresseInterne } from '../federation/config.js';
+import { controlerEnvoi, planifierEnvoi } from '../federation/service.js';
+import { ErreurFederation } from '../federation/pairs.js';
 import { applyRules } from '../services/rules.js';
 import { applyBoxRoutes } from '../services/boxroutes.js';
 import { suivreLivraison } from '../services/remisedirecte.js';
@@ -21,8 +24,7 @@ const MOVE_TARGETS = ['inbox', 'archive', 'trash']; // destinations autorisées 
 const snippet = (body, bodyHtml) => apercu(body, bodyHtml);
 
 function senderView(id) {
-  const u = db.prepare('SELECT id, email, display_name, avatar_color FROM users WHERE id = ?').get(id);
-  return u ? { id: u.id, email: u.email, displayName: u.display_name, avatarColor: u.avatar_color } : null;
+  return senderMapFor([id]).get(id) || null;
 }
 
 // Remplace l'adresse affichée par celle d'émission choisie (alias / adresse pro),
@@ -55,9 +57,10 @@ function resolveFromEmail(user, raw) {
 
 function recipientsView(messageId) {
   const rows = db.prepare(
-    `SELECT r.kind, u.id, u.email, u.display_name AS displayName, u.avatar_color AS avatarColor, u.public_key AS publicKey
+    `SELECT r.kind, u.id, u.email, u.display_name AS displayName, u.avatar_color AS avatarColor, u.public_key AS publicKey,
+            u.distant_domaine AS domaine, u.cle_changee_le AS cleChangeeLe
      FROM recipients r JOIN users u ON u.id = r.user_id WHERE r.message_id = ? ORDER BY r.id`
-  ).all(messageId);
+  ).all(messageId).map(({ domaine, cleChangeeLe, ...r }) => (domaine ? { ...r, federe: { domaine, publicKey: r.publicKey, cleChangeeLe } } : r));
   return { to: rows.filter((r) => r.kind === 'to'), cc: rows.filter((r) => r.kind === 'cc') };
 }
 
@@ -67,8 +70,12 @@ function senderMapFor(ids) {
   const uniq = [...new Set(ids.filter(Boolean))];
   if (!uniq.length) return map;
   const ph = uniq.map(() => '?').join(',');
-  for (const u of db.prepare(`SELECT id, email, display_name, avatar_color FROM users WHERE id IN (${ph})`).all(...uniq)) {
-    map.set(u.id, { id: u.id, email: u.email, displayName: u.display_name, avatarColor: u.avatar_color });
+  for (const u of db.prepare(`SELECT id, email, display_name, avatar_color, distant_domaine, public_key, cle_changee_le FROM users WHERE id IN (${ph})`).all(...uniq)) {
+    const s = { id: u.id, email: u.email, displayName: u.display_name, avatarColor: u.avatar_color };
+    // Correspondant d'un autre serveur Comet : de quoi afficher le badge et calculer le
+    // numéro de sécurité (sa clé publique), et avertir si elle a changé.
+    if (u.distant_domaine) s.federe = { domaine: u.distant_domaine, publicKey: u.public_key || null, cleChangeeLe: u.cle_changee_le || null };
+    map.set(u.id, s);
   }
   return map;
 }
@@ -94,6 +101,11 @@ function emailToId(raw) {
   let email = String(raw || '').trim().toLowerCase();
   if (!email) return null;
   if (!email.includes('@')) email = `${email}@comet.mail`;
+  // Adresse au nom de NOTRE domaine fédéré (« x@serveur-a.fr ») : le compte exact s'il
+  // existe, sinon son adresse interne « x@comet.mail ».
+  const exact = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  if (exact) return exact.id;
+  email = versAdresseInterne(email);
   const u = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
   if (u) return u.id;
   // Adresses alias actives → compte propriétaire
@@ -339,6 +351,9 @@ router.get('/:id', (req, res) => {
       // manque doit se VOIR, sinon le lecteur cherche une pièce qui n'arrivera jamais.
       attachments: [],
       sentAt: m.sent_at, from: applyFrom(senderView(m.sender_id), m.from_email, m.ext_from_name), to: peers.to, cc: peers.cc, thread,
+      // Reçu d'un autre serveur Comet : la liste À/Cc complète annoncée par l'expéditeur
+      // (seuls les destinataires d'ICI sont des comptes dans `to`/`cc`).
+      federe: m.fed_entete ? JSON.parse(m.fed_entete) : null,
     },
   };
   // Destruction après lecture : on supprime la copie reçue une fois consultée
@@ -356,6 +371,26 @@ router.post('/', (req, res) => {
   if (toRes.ids.length + ccRes.ids.length === 0) {
     return res.status(400).json({ error: 'Aucun destinataire valide', unknown: [...toRes.unknown, ...ccRes.unknown] });
   }
+
+  // Destinataires d'AUTRES serveurs Comet : contrôlés avant toute écriture (chiffrement
+  // obligatoire, clé de message présente pour chacun, options non encore transportables).
+  let distants = [];
+  try {
+    const eph0 = req.body.ephemeral || {};
+    const sched0 = req.body.scheduledAt ? Date.parse(req.body.scheduledAt) : NaN;
+    distants = controlerEnvoi({
+      expediteur: req.user,
+      ids: [...toRes.ids, ...ccRes.ids],
+      encrypted: !!encrypted,
+      cles: req.body.keys || {},
+      programme: !isNaN(sched0) && sched0 > Date.now() + 5000,
+      ephemere: !!eph0.burnAfterRead || Math.floor(Number(eph0.ttlSeconds) || 0) > 0,
+    });
+  } catch (e) {
+    if (e instanceof ErreurFederation) return res.status(e.statut).json({ error: e.message, code: e.code });
+    throw e;
+  }
+  const estDistant = new Set(distants);
 
   let messageId;
   if (encrypted) {
@@ -389,7 +424,8 @@ router.post('/', (req, res) => {
     for (const id of ccRes.ids) insR.run(messageId, id, 'cc');
 
     const insItem = db.prepare('INSERT INTO mail_items (user_id, message_id, folder, is_read) VALUES (?, ?, ?, ?)');
-    const inboxRecipients = [...new Set([...toRes.ids, ...ccRes.ids])];
+    // Les correspondants distants n'ont pas de boîte ici : leur copie part chez eux.
+    const inboxRecipients = [...new Set([...toRes.ids, ...ccRes.ids])].filter((id) => !estDistant.has(id));
     if (isScheduled) {
       insItem.run(req.user.id, messageId, 'scheduled', 1); // copie de l'expéditeur en attente
     } else {
@@ -412,6 +448,8 @@ router.post('/', (req, res) => {
       const uid = emailToId(email);
       if (uid && encKey) insK.run(messageId, uid, encKey);
     }
+    // Copie pour les autres serveurs : mise en file, livrée signée en arrière-plan.
+    if (!isScheduled && distants.length) planifierEnvoi(messageId, req.user);
 
     // Réponses automatiques d'absence (à l'envoi réel uniquement, pas pour un message programmé)
     const today = new Date().toISOString().slice(0, 10);

@@ -15,7 +15,7 @@ const count = (sql, ...p) => db.prepare(sql).get(...p)?.n ?? 0;
 // ── Statistiques globales ───────────────────────────────────────────────────
 router.get('/stats', (req, res) => {
   res.json({
-    users: count('SELECT COUNT(*) AS n FROM users WHERE is_system = 0'),
+    users: count('SELECT COUNT(*) AS n FROM users WHERE is_system = 0 AND distant_domaine IS NULL'),
     online: onlineUserIds().length,
     messages: count('SELECT COUNT(*) AS n FROM messages'),
     sessions: count('SELECT COUNT(*) AS n FROM sessions'),
@@ -32,7 +32,8 @@ router.get('/users', (req, res) => {
            u.can_pipelines AS canPipelines,
            (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id) AS sessions,
            (SELECT MAX(s.last_seen) FROM sessions s WHERE s.user_id = u.id) AS lastSeen
-    FROM users u ORDER BY u.is_system ASC, u.created_at ASC
+    FROM users u WHERE u.distant_domaine IS NULL -- correspondants d'autres serveurs : pas des comptes d'ici
+    ORDER BY u.is_system ASC, u.created_at ASC
   `).all();
   res.json({
     users: rows.map((u) => ({
@@ -46,7 +47,7 @@ router.get('/users', (req, res) => {
 
 // ── Modifier un compte (droits admin) ───────────────────────────────────────
 router.patch('/users/:id', (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  const u = db.prepare('SELECT * FROM users WHERE id = ? AND distant_domaine IS NULL').get(req.params.id);
   if (!u) return res.status(404).json({ error: 'Compte introuvable' });
   if (typeof req.body.isAdmin === 'boolean') {
     if (u.id === req.user.id && !req.body.isAdmin) return res.status(400).json({ error: 'Vous ne pouvez pas retirer vos propres droits' });
@@ -60,7 +61,7 @@ router.patch('/users/:id', (req, res) => {
 
 // ── Supprimer un compte ─────────────────────────────────────────────────────
 router.delete('/users/:id', (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  const u = db.prepare('SELECT * FROM users WHERE id = ? AND distant_domaine IS NULL').get(req.params.id);
   if (!u) return res.status(404).json({ error: 'Compte introuvable' });
   if (u.is_system) return res.status(400).json({ error: 'Compte système non supprimable' });
   if (u.id === req.user.id) return res.status(400).json({ error: 'Vous ne pouvez pas vous supprimer vous-même' });

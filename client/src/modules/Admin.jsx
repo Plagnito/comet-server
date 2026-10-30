@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { Avatar, MODULES } from '../components/shell-meta.jsx';
 import Icon from '../components/Icon.jsx';
+import AdminFederation from '../components/AdminFederation.jsx';
 
 // Modules désactivables par l'organisation (le Courrier et les modules admin restent).
 const TOGGLEABLE = MODULES.filter((m) => !m.adminOnly && m.key !== 'mail');
@@ -107,6 +108,8 @@ export default function Admin() {
           </div>
         ))}
       </div>
+
+      <AdminFederation />
 
       <div className="setting-title" style={{ marginTop: 24, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 7 }}><Icon name="building" size={16} /> Salles de réunion</div>
       <div className="card">
