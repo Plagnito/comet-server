@@ -31,10 +31,13 @@ cd comet-server
 docker compose up -d
 ```
 
-Ouvrez **http://adresse-de-la-machine:4800** et créez votre compte. **Le premier compte
-créé devient administrateur.** C'est tout : la base de données, les pièces jointes et le
-secret de session sont créés au premier démarrage et rangés dans un volume Docker, qui
-survit aux mises à jour.
+Le port Docker est limité à la machine locale par défaut. Sur le serveur, ouvrez
+**http://localhost:4800**. Récupérez le code d'installation avec
+`docker compose exec comet cat /comet/server/data/.bootstrap_token`, puis saisissez-le
+pour créer le premier administrateur. Gardez ce code privé : l'API publique ne le
+renvoie jamais. La base, les pièces jointes et les secrets restent dans le volume
+Docker après une mise à jour. Depuis un autre ordinateur, utilisez un transfert SSH
+local ou un relais HTTPS. Voir [installation et proxy](docs/bootstrap.md).
 
 Une fois vos comptes créés, fermez les inscriptions dans `docker-compose.yml`
 (`COMET_INSCRIPTION: fermee`), puis `docker compose up -d`.
@@ -58,6 +61,9 @@ une adresse en **HTTPS**. Deux façons courantes :
 
 Renseignez ensuite cette adresse dans `COMET_BASE_URL` (liens de partage, pièces jointes
 volumineuses, connexion Gmail/Outlook).
+Pour relayer l'IP du client, renseignez les IP/CIDR réels du proxy immédiat dans
+`COMET_TRUST_PROXY`. Les en-têtes relayés sont ignorés par défaut ; les nombres de
+sauts ne sont pas acceptés.
 
 ### Sans Docker
 

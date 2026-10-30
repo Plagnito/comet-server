@@ -5,6 +5,10 @@
 // invalides puisqu'ils ne se vérifient plus).
 
 import { randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveBootstrapToken } from './util/bootstrap.js';
 
 const PROD = process.env.NODE_ENV === 'production';
 
@@ -57,6 +61,27 @@ function resolveJwtSecret() {
 
 export const JWT_SECRET = resolveJwtSecret();
 export const JWT_EXPIRE = process.env.JWT_EXPIRE || '30d';
+
+// Code local à usage unique pour l'attribution du premier rôle administrateur.
+// Il n'est jamais renvoyé au navigateur ni imprimé dans les journaux.
+export const BOOTSTRAP_TOKEN = resolveBootstrapToken(process.env.COMET_BOOTSTRAP_TOKEN,
+  process.env.COMET_DATA_DIR || join(dirname(fileURLToPath(import.meta.url)), '..', 'data'));
+
+function trustedProxies(raw) {
+  if (!raw?.trim() || raw.trim() === 'false') return false;
+  const entries = raw.split(',').map((value) => value.trim());
+  for (const entry of entries) {
+    if (entry === 'loopback') continue;
+    const [address, bits, extra] = entry.split('/');
+    const family = isIP(address);
+    if (!family || extra !== undefined || (bits !== undefined && (!/^\d+$/.test(bits)
+      || Number(bits) < 1 || Number(bits) > (family === 4 ? 32 : 128)))) {
+      throw new Error('COMET_TRUST_PROXY : IP/CIDR de proxy explicite ou loopback requis, aucun nombre de sauts');
+    }
+  }
+  return entries;
+}
+export const TRUST_PROXY = trustedProxies(process.env.COMET_TRUST_PROXY);
 
 // Inscription libre (e-mail + mot de passe) : COMET_INSCRIPTION=ouverte | fermee.
 // Fermée, seuls les comptes déjà existants (ou créés autrement) peuvent se connecter.

@@ -31,9 +31,13 @@ cd comet-server
 docker compose up -d
 ```
 
-Open **http://your-machine:4800** and create your account. **The first account created
-becomes the administrator.** That's it: the database, attachment storage and session secret
-are created on first start and kept in a Docker volume that survives updates.
+The Docker port is bound to loopback by default. On the server, open
+**http://localhost:4800**. Retrieve the installation code with
+`docker compose exec comet cat /comet/server/data/.bootstrap_token`, then enter it
+when creating the first administrator. Keep that code private; it is never sent by
+the public API. The database, attachment storage and secrets are kept in the Docker
+volume across updates. For setup from another computer, use a local SSH forward or
+an HTTPS reverse proxy. See [setup and proxy configuration](docs/bootstrap.md).
 
 Once your accounts exist, close sign-ups in `docker-compose.yml`
 (`COMET_INSCRIPTION: fermee`), then run `docker compose up -d` again.
@@ -56,6 +60,8 @@ address (browsers only allow the encryption APIs on secure origins). Two common 
 
 Then put that address in `COMET_BASE_URL` (share links, large attachments, Gmail/Outlook
 sign-in).
+If client IP forwarding is needed, set `COMET_TRUST_PROXY` to the immediate proxy's
+actual IP/CIDR. Forwarded headers are ignored by default; a hop count is not accepted.
 
 ### Without Docker
 

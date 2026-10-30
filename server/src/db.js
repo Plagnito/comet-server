@@ -837,10 +837,9 @@ export function seed() {
 
 seed();
 
-// Bootstrap admin : COMET_ADMIN_EMAIL promeut un compte au rang d'administrateur au démarrage.
-if (process.env.COMET_ADMIN_EMAIL) {
-  db.prepare('UPDATE users SET is_admin = 1 WHERE email = ?').run(process.env.COMET_ADMIN_EMAIL.trim().toLowerCase());
-}
+// Les inscriptions ne prouvent pas la possession d'une adresse. Ne jamais
+// attribuer un rôle au redémarrage à partir du seul COMET_ADMIN_EMAIL.
+// L'installation authentifiée est effectuée par routes/auth.js.
 
 // Purge périodique : messages éphémères expirés (cascade vers mail_items/recipients/
 // message_keys), codes d'appairage d'extension expirés, et jetons d'extension

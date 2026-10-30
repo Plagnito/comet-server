@@ -5,9 +5,13 @@ import { assertStrongPassword } from '../util/password.js';
 import { validateBody, registerSchema, loginSchema } from '../util/validate.js';
 import { deliverMessage } from '../services/mail.js';
 import { generateSecret, verifyTotp, otpauthUri, generateRecoveryCodes } from '../services/totp.js';
-import { INSCRIPTION_OUVERTE } from '../config.js';
+import { INSCRIPTION_OUVERTE, BOOTSTRAP_TOKEN } from '../config.js';
+import { matchesBootstrapToken } from '../util/bootstrap.js';
 
 const router = Router();
+// Migration : conserver les administrateurs déjà présents sans rouvrir le setup.
+db.prepare("INSERT OR IGNORE INTO settings (k, v) SELECT 'bootstrap_complete', '1' WHERE EXISTS (SELECT 1 FROM users WHERE is_admin = 1)").run();
+const bootstrapComplete = () => db.prepare("SELECT v FROM settings WHERE k = 'bootstrap_complete'").get()?.v === '1';
 
 const COLORS = ['#4f46e5', '#db2777', '#0d9488', '#ea580c', '#7c3aed', '#2563eb', '#c026d3', '#16a34a'];
 const pickColor = () => COLORS[Math.floor(Math.random() * COLORS.length)];
@@ -23,7 +27,7 @@ function normalizeEmail(raw) {
 // Réponse d'authentification : crée une session, puis renvoie jeton + profil + clé privée enveloppée
 function authPayload(user, req, res) {
   const ua = String(req.headers['user-agent'] || '').slice(0, 300);
-  const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+  const ip = req.ip || req.socket?.remoteAddress || '';
   const sid = db.prepare('INSERT INTO sessions (user_id, user_agent, ip) VALUES (?, ?, ?)').run(user.id, ua, ip).lastInsertRowid;
   return {
     token: signToken(user, sid),
@@ -34,13 +38,18 @@ function authPayload(user, req, res) {
 
 // Ce que la page de connexion doit proposer, AVANT toute session.
 router.get('/options', (req, res) => {
-  res.json({ inscription: INSCRIPTION_OUVERTE });
+  const bootstrapRequired = !bootstrapComplete();
+  res.json({ inscription: INSCRIPTION_OUVERTE || bootstrapRequired, bootstrapRequired });
 });
 
-const inscriptionFermee = (req, res, next) => (INSCRIPTION_OUVERTE ? next()
+const inscriptionFermee = (req, res, next) => (INSCRIPTION_OUVERTE || !bootstrapComplete() ? next()
   : res.status(403).json({ error: 'Les inscriptions sont fermées sur ce serveur.', code: 'inscription_fermee' }));
 
 router.post('/register', inscriptionFermee, validateBody(registerSchema), (req, res) => {
+  const authorizedSetup = matchesBootstrapToken(req.body.bootstrapToken, BOOTSTRAP_TOKEN);
+  if (!bootstrapComplete() && !authorizedSetup) {
+    return res.status(403).json({ error: "Code d'installation requis pour créer le premier administrateur.", code: 'bootstrap_required' });
+  }
   const email = normalizeEmail(req.body.email);
   const displayName = String(req.body.displayName || '').trim();
   const password = String(req.body.password || '');
@@ -57,14 +66,23 @@ router.post('/register', inscriptionFermee, validateBody(registerSchema), (req, 
     return res.status(409).json({ error: 'Cette adresse est déjà utilisée' });
   }
 
-  const info = db
-    .prepare('INSERT INTO users (email, display_name, password_hash, avatar_color, public_key, enc_private_key, listed) VALUES (?, ?, ?, ?, ?, ?, 0)')
-    .run(email, displayName, hashPassword(password), pickColor(), publicKey, encPrivateKey);
-  // Serveur neuf : le premier compte créé alors qu'aucun administrateur n'existe le
-  // devient. Sans cette règle, un serveur auto-hébergé n'aurait personne pour le gérer
-  // avant un redémarrage avec COMET_ADMIN_EMAIL.
-  if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {
-    db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(info.lastInsertRowid);
+  const passwordHash = hashPassword(password);
+  let info;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const first = !bootstrapComplete();
+    if ((first && !authorizedSetup) || (!first && !INSCRIPTION_OUVERTE)) {
+      db.exec('ROLLBACK');
+      return res.status(403).json({ error: 'Création de compte non autorisée' });
+    }
+    info = db.prepare('INSERT INTO users (email, display_name, password_hash, avatar_color, public_key, enc_private_key, listed, is_admin) VALUES (?, ?, ?, ?, ?, ?, 0, ?)')
+      .run(email, displayName, passwordHash, pickColor(), publicKey, encPrivateKey, first ? 1 : 0);
+    if (first) db.prepare("INSERT INTO settings (k, v) VALUES ('bootstrap_complete', '1') ON CONFLICT(k) DO UPDATE SET v = '1'").run();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    if (error.errcode === 2067 || error.code?.startsWith('ERR_SQLITE_CONSTRAINT')) return res.status(409).json({ error: 'Cette adresse est déjà utilisée' });
+    throw error;
   }
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
 

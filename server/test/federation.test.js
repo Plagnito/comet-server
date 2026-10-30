@@ -111,7 +111,7 @@ async function inscrire(s, local, nom) {
   const kp = await cc.generateKeyPair();
   const publicKey = await cc.exportPublicKey(kp);
   const encPrivateKey = await cc.wrapPrivateKey(kp, MDP);
-  const r = await api(s, 'POST', '/auth/register', null, { email: `${local}@comet.mail`, displayName: nom, password: MDP, publicKey, encPrivateKey });
+  const r = await api(s, 'POST', '/auth/register', null, { email: `${local}@comet.mail`, displayName: nom, password: MDP, bootstrapToken: process.env.COMET_BOOTSTRAP_TOKEN, publicKey, encPrivateKey });
   expect(r.statut, r.texte).toBe(201);
   return { jeton: r.json.token, email: `${local}@comet.mail`, publicKey, privee: kp.privateKey };
 }

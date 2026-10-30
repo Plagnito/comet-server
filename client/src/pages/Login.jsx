@@ -7,9 +7,13 @@ export default function Login({ onBack }) {
   const { login, register, verify2fa } = useAuth();
   // Inscription : proposée seulement si CE serveur l'a ouverte (COMET_INSCRIPTION).
   const [inscription, setInscription] = useState(false);
+  const [bootstrapRequired, setBootstrapRequired] = useState(false);
+  const [bootstrapToken, setBootstrapToken] = useState('');
   const [mode, setMode] = useState('login');
   const [name, setName] = useState('');
-  useEffect(() => { api.get('/auth/options').then((r) => setInscription(!!r?.inscription)).catch(() => {}); }, []);
+  useEffect(() => { api.get('/auth/options').then((r) => {
+    setInscription(!!r?.inscription); setBootstrapRequired(!!r?.bootstrapRequired);
+  }).catch(() => {}); }, [mode]);
   const isRegister = inscription && mode === 'register';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -26,7 +30,8 @@ export default function Login({ onBack }) {
       if (twoFA) {
         await verify2fa(twoFA.tmpToken, code, password);
       } else if (isRegister) {
-        await register(email, name, password);
+        await register(email, name, password, bootstrapToken || undefined);
+        setBootstrapToken('');
       } else {
         const r = await login(email, password);
         if (r?.twoFactorRequired) { setTwoFA({ tmpToken: r.tmpToken }); setBusy(false); return; }
@@ -79,6 +84,13 @@ export default function Login({ onBack }) {
             <div className="field">
               <label>Nom affiché</label>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Camille Martin" autoFocus />
+            </div>
+          )}
+          {isRegister && bootstrapRequired && (
+            <div className="field">
+              <label>Code d'installation</label>
+              <input type="password" value={bootstrapToken} onChange={(e) => setBootstrapToken(e.target.value)} autoComplete="off" />
+              <div className="hint">Pour le premier administrateur uniquement. Récupérez ce code dans le fichier .bootstrap_token du serveur.</div>
             </div>
           )}
           <div className="field">
