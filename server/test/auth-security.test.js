@@ -33,7 +33,12 @@ function mfa(who) {
 }
 const post = (path, who = alice, body = {}) => request(server).post(`/api/auth/${path}`).set('Authorization', `Bearer ${who.token}`).send(body);
 const me = (token) => request(server).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
-const connect = (token) => new WebSocket(`ws://127.0.0.1:${server.address().port}/ws?token=${encodeURIComponent(token)}`);
+// Comme le client : connexion sans jeton dans l'adresse, jeton dans le premier message.
+const connect = (token) => {
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token })));
+  return ws;
+};
 function waitFor(ws, event, predicate = () => true) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => { ws.off(event, listener); reject(new Error(`timeout ${event}`)); }, 3000);

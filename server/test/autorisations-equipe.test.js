@@ -36,9 +36,10 @@ function courrier(de, a) {
   db.prepare("INSERT INTO recipients (message_id, user_id) VALUES (?, ?)").run(m, a.id);
 }
 
-const url = (token) => `ws://127.0.0.1:${server.address().port}/ws?token=${encodeURIComponent(token)}`;
 function ouvrir(token) {
-  const ws = new WebSocket(url(token)); sockets.add(ws);
+  // Comme le client : connexion sans jeton dans l'adresse, jeton dans le premier message.
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`); sockets.add(ws);
+  ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token })));
   ws.recus = [];
   ws.on('message', (d) => { try { ws.recus.push(JSON.parse(d)); } catch { /* */ } });
   return ws;

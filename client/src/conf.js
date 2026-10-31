@@ -42,9 +42,13 @@ export class Conference {
     this.onEvent({ type: 'local', stream: this.localStream });
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(this.token)}`);
+    // Jeton dans le premier message, jamais dans l'adresse (journaux du tunnel, du proxy).
+    this.ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } this._onMsg(m); };
-    this.ws.onopen = () => this._send({ type: 'conf:join', room, name: this.name });
+    this.ws.onopen = () => {
+      this._send({ type: 'auth', token: this.token });
+      this._send({ type: 'conf:join', room, name: this.name });
+    };
     this.ws.onclose = () => this.onEvent({ type: 'closed' });
   }
 

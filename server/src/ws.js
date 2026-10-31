@@ -15,6 +15,7 @@ import { visiblesPar, audienceDe, ontEchange, orgDe, voit } from './services/vis
 export const TAILLE_MAX_MESSAGE = 64 * 1024;
 export const MESSAGES_MAX = 200;           // par fenêtre de...
 export const FENETRE_MS = 10_000;           // ...10 secondes
+export const AUTH_DELAI_MS = 10_000;        // délai pour envoyer le message d'authentification
 function debitDepasse(ws, maintenant = Date.now()) {
   if (!ws.debit || maintenant - ws.debit.depuis >= FENETRE_MS) ws.debit = { depuis: maintenant, n: 0 };
   ws.debit.n += 1;
@@ -174,9 +175,29 @@ export function attachWebSocket(server) {
     // L'écouteur suffit : la bibliothèque ferme déjà ce socket-là, et seulement lui, avec
     // le bon code (1009 pour un message trop gros) ; le couper ici l'en empêcherait.
     ws.on('error', () => { /* socket fermé par la bibliothèque */ });
-    let userId;
+
+    // ── Authentification : par le PREMIER message, jamais par l'adresse ───────
+    // Un jeton dans l'URL (?token=) finit dans les journaux du tunnel ou du proxy, les
+    // outils de diagnostic et l'historique : c'est le jeton de session complet. Le client
+    // ouvre donc la connexion nue et envoie { type: 'auth', token } en premier. Un ancien
+    // client (onglet resté ouvert pendant une mise à jour) reçoit 4400 et réessaie, sans
+    // être déconnecté : 4001 lui ferait effacer sa session.
+    if (new URL(req.url, 'http://x').searchParams.has('token')) { ws.close(4400, 'auth-par-message'); return; }
+    ws.authEnAttente = true;
+    const delai = setTimeout(() => { if (ws.authEnAttente) { try { ws.close(4001, 'auth'); } catch { /* */ } } }, AUTH_DELAI_MS);
+    delai.unref?.();
+    ws.once('message', (raw) => {
+      clearTimeout(delai);
+      ws.authEnAttente = false;
+      let token = null;
+      try { const m = JSON.parse(raw.toString()); if (m && m.type === 'auth' && typeof m.token === 'string') token = m.token; } catch { /* */ }
+      if (!token || !authentifier(ws, token)) { ws.close(4001, 'auth'); return; }
+      if (ws.isGuest) installerInvite(ws); else installerCompte(ws);
+    });
+  });
+
+  function authentifier(ws, token) {
     try {
-      const token = new URL(req.url, 'http://x').searchParams.get('token');
       const payload = jwt.verify(token, SECRET);
       ws.authPayload = payload;
       if (payload.guest) {
@@ -184,21 +205,21 @@ export function attachWebSocket(server) {
         ws.isGuest = true;
         ws.guestRoom = String(payload.room || '');
         ws.guestName = String(payload.name || 'Invité');
-      } else {
-        if (!userForSession(payload)) throw new Error('invalid');
-        // Session révocable : un jeton dont la session a été révoquée ne doit plus ouvrir le WS.
-        // Avant, jwt.verify suffisait → une session « révoquée » gardait le temps réel jusqu'à
-        // l'expiration du JWT (~30 j). Même garde que authRequired (auth.js).
-        if (payload.sid && !db.prepare('SELECT id FROM sessions WHERE id = ? AND user_id = ?').get(payload.sid, payload.id)) throw new Error('revoked');
-        userId = payload.id;
-        ws.userId = userId;
+        return true;
       }
-    } catch {
-      ws.close(4001, 'auth'); return;
-    }
+      if (!userForSession(payload)) return false;
+      // Session révocable : un jeton dont la session a été révoquée ne doit plus ouvrir le WS.
+      // Avant, jwt.verify suffisait → une session « révoquée » gardait le temps réel jusqu'à
+      // l'expiration du JWT (~30 j). Même garde que authRequired (auth.js).
+      if (payload.sid && !db.prepare('SELECT id FROM sessions WHERE id = ? AND user_id = ?').get(payload.sid, payload.id)) return false;
+      ws.userId = payload.id;
+      return true;
+    } catch { return false; }
+  }
 
+  function installerInvite(ws) {
     // Invité : socket conférence seulement, pas de présence ni d'état applicatif.
-    if (ws.isGuest) {
+    {
       ws.isAlive = true;
       ws.on('pong', () => { ws.isAlive = true; });
       ws.on('message', (raw) => {
@@ -209,9 +230,11 @@ export function attachWebSocket(server) {
         else if (msg.type === 'conf:signal' && msg.to) confSignal(ws, ws.guestRoom, String(msg.to), msg.data);
       });
       ws.on('close', () => { if (ws.confJoined) for (const room of [...ws.confJoined]) confLeave(ws, room); });
-      return;
     }
+  }
 
+  function installerCompte(ws) {
+    const userId = ws.userId;
     const wasOffline = !isOnline(userId);
     add(userId, ws);
     ws.isAlive = true;
@@ -247,11 +270,11 @@ export function attachWebSocket(server) {
       const wentOffline = remove(userId, ws);
       if (wentOffline) annoncerPresence(userId, false);
     });
-  });
+  }
 
   const heartbeat = setInterval(() => {
     for (const client of wss.clients) {
-      if (!liveSession(client)) continue;
+      if (client.authEnAttente || !liveSession(client)) continue;
       if (client.isAlive === false) { client.terminate(); continue; }
       client.isAlive = false;
       try { client.ping(); } catch {}

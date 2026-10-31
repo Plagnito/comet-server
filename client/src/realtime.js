@@ -13,8 +13,11 @@ export function connectRealtime(token, handlers = {}) {
     const usedToken = token;
     const current = ++generation;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+    // Le jeton ne passe jamais dans l'adresse (journaux du tunnel, du proxy) : il part dans
+    // le premier message, dès l'ouverture.
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
     const socket = ws;
+    socket.onopen = () => { try { socket.send(JSON.stringify({ type: 'auth', token: usedToken })); } catch {} };
     socket.onmessage = (e) => {
       if (current !== generation) return;
       let m; try { m = JSON.parse(e.data); } catch { return; }
