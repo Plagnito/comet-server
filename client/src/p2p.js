@@ -1,6 +1,8 @@
 // Transfert de pièces jointes en pair-à-pair (WebRTC DataChannel).
 // Le fichier ne touche jamais le serveur ; il est chiffré (AES-GCM) avec une clé
 // transportée dans le message E2EE → ni le serveur ni le canal de signaling ne lisent rien.
+import { chargerIce } from './ice.js';
+
 const subtle = globalThis.crypto.subtle;
 
 const b64 = (buf) => { const b = new Uint8Array(buf); let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); };
@@ -26,9 +28,10 @@ let rtcConfig = { iceServers: [] };
 const offers = new Map();    // transferId -> { buf:ArrayBuffer, keyB64 }
 const transfers = new Map(); // transferId -> état de connexion
 
-export async function initP2P(send) {
+// `jeton` : la session, pour recevoir les identifiants du relais TURN de l'instance.
+export async function initP2P(send, jeton) {
   sendSignal = send;
-  try { rtcConfig = await fetch('/api/rtc-config').then((r) => r.json()); } catch {}
+  rtcConfig = { iceServers: await chargerIce(jeton) };
 }
 
 // ── Côté émetteur : met un fichier (déjà chiffré) à disposition tant que l'app est ouverte ──

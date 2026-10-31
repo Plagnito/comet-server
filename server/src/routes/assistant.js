@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../db.js';
 import { authRequired } from '../auth.js';
+import { cleActive } from '../services/cles-connecteur.js';
 
 const router = Router();
 const getS = (k) => db.prepare('SELECT v FROM settings WHERE k = ?').get(k)?.v ?? null;
@@ -26,7 +27,7 @@ const fresh = (iso, minutes) => {
 // questions dans une file que personne ne dépilera.
 export function aiProviderState() {
   const on = enabled();
-  const hasKey = !!getS('connector_key_hash');
+  const hasKey = cleActive('ia'); // une clé de connecteur active, avec le droit « ia »
   const lastSeen = getS('connector_last_seen');
   const aiSeen = getS('connector_ai_seen');           // dernier passage du connecteur sur la file IA
   const aiReady = getS('connector_ai_ready') === '1'; // le connecteur a-t-il un fournisseur IA ?
@@ -35,7 +36,7 @@ export function aiProviderState() {
   if (!on) return { ...base, state: 'off', ready: false, reason: null };
   if (!hasKey) return {
     ...base, state: 'no-connector', ready: false,
-    reason: "Aucun connecteur n'est raccordé à ce serveur. Un administrateur doit générer une clé dans Réglages → Options avancées, puis lancer le connecteur avec l'option --ai-url.",
+    reason: "Aucun connecteur n'est raccordé à ce serveur pour l'assistant. Un administrateur doit générer une clé avec le droit « IA » dans Réglages → Options avancées, puis lancer le connecteur avec l'option --ai-url.",
   };
   if (!fresh(lastSeen, STALE_MIN)) return {
     ...base, state: 'connector-offline', ready: false,

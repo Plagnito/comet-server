@@ -160,6 +160,11 @@ Everything is described in [`server/.env.example`](server/.env.example): sign-up
 address, one-click Gmail/Outlook accounts, a TURN server for video across the Internet,
 desktop notifications. With Docker nothing is mandatory.
 
+**Backups:** `node scripts/sauvegarde.mjs <empty-folder>` makes a consistent copy of the
+database and attachments while the server runs; `node scripts/restauration.mjs <folder>`
+checks and restores it. Keep `JWT_SECRET` and `COMET_MAIL_SECRET` separately: they are
+not in the backup. See [`docs/backup.md`](docs/backup.md).
+
 ## Development
 
 ```bash

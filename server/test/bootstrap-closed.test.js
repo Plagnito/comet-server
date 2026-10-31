@@ -20,5 +20,5 @@ describe('Installation avec inscriptions fermées', () => {
     expect(setup.status).toBe(201); expect(setup.body.user.isAdmin).toBe(true);
     expect((await request(app).get('/api/auth/options')).body.inscription).toBe(false);
     expect((await request(app).post('/api/auth/register').send({ ...body, email: 'closed-next@comet.mail' })).status).toBe(403);
-  });
+  }, 30_000); // charge tout le serveur dans le test : un runner chargé dépasse les 5 s par défaut
 });

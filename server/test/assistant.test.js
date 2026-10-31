@@ -30,7 +30,8 @@ beforeAll(async () => {
 afterAll(() => {
   db.prepare("UPDATE users SET is_admin = 0 WHERE email = 'lea@comet.mail'").run();
   db.prepare('DELETE FROM ai_jobs').run();
-  for (const k of ['ai_enabled', 'connector_key_hash', 'connector_last_seen', 'connector_ai_seen', 'connector_ai_ready']) delS(k);
+  for (const k of ['ai_enabled', 'connector_last_seen', 'connector_ai_seen', 'connector_ai_ready']) delS(k);
+  db.prepare('DELETE FROM connector_keys').run();
 });
 
 // Chaque test repart d'un état connu : assistant activé, connecteur vu à l'instant,
@@ -49,13 +50,13 @@ const status = (token) => request(app).get('/api/assistant/status').set('Authori
 
 describe('Assistant IA — état du moteur', () => {
   it('signale « aucun connecteur » quand aucune clé n\'a été générée', async () => {
-    const hash = db.prepare("SELECT v FROM settings WHERE k = 'connector_key_hash'").get()?.v;
-    delS('connector_key_hash');
+    // On suspend les clés le temps du test (révocation simulée), puis on les rétablit.
+    db.prepare("UPDATE connector_keys SET revoked_at = datetime('now') WHERE revoked_at IS NULL").run();
     const r = await status(member);
     expect(r.body.state).toBe('no-connector');
     expect(r.body.ready).toBe(false);
     expect(r.body.reason).toMatch(/connecteur/i);
-    setS('connector_key_hash', hash); // on rétablit pour les tests suivants
+    db.prepare('UPDATE connector_keys SET revoked_at = NULL').run();
   });
 
   it('signale un connecteur hors ligne quand il ne s\'est pas manifesté depuis longtemps', async () => {

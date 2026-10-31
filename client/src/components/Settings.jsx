@@ -103,10 +103,16 @@ export default function Settings({ onClose, onAccountsChanged }) {
   const [conn, setConn] = useState(null);       // état du connecteur (admin)
   const [connKey, setConnKey] = useState('');   // clé affichée une seule fois
   const [storagePath, setStoragePath] = useState('');
+  const [connCles, setConnCles] = useState([]);  // clés du connecteur (sans secret)
+  const [connDroits, setConnDroits] = useState([]);
+  const [cleForm, setCleForm] = useState({ label: '', droits: [], expire: '' });
+  const [cleErr, setCleErr] = useState('');
 
+  const chargerCles = () => api.get('/connector/keys').then((r) => { setConnCles(r.cles); setConnDroits(r.droits); }).catch(() => {});
   useEffect(() => {
     if (!user.isAdmin) return;
     api.get('/connector/status').then((s) => { setConn(s); setStoragePath(s.storage?.path || ''); }).catch(() => {});
+    chargerCles();
   }, [user.isAdmin]);
 
   useEffect(() => { if (isDesktop) window.cometDesktop.getAutoStart().then((v) => setAutoStart(!!v)).catch(() => {}); }, [isDesktop]);
@@ -117,8 +123,22 @@ export default function Settings({ onClose, onAccountsChanged }) {
   useEffect(() => { if (isDesktop && window.cometDesktop.torrent) window.cometDesktop.torrent.get().then(setTorrent).catch(() => {}); }, [isDesktop]);
   async function saveTorrent(patch) { setTorrent((t) => ({ ...t, ...patch })); try { const r = await window.cometDesktop.torrent.set(patch); setTorrent(r); } catch {} }
 
-  async function genConnKey() { const r = await api.post('/connector/key', {}); setConnKey(r.key); api.get('/connector/status').then(setConn).catch(() => {}); }
-  async function revokeConnKey() { await api.del('/connector/key'); setConnKey(''); api.get('/connector/status').then(setConn).catch(() => {}); }
+  async function creerCleConnecteur(e) {
+    e.preventDefault(); setCleErr('');
+    try {
+      const r = await api.post('/connector/keys', {
+        label: cleForm.label.trim() || 'Connecteur', droits: cleForm.droits,
+        expireLe: cleForm.expire ? new Date(`${cleForm.expire}T23:59:59`).toISOString() : null,
+      });
+      setConnKey(r.key); setCleForm({ label: '', droits: [], expire: '' });
+      chargerCles(); api.get('/connector/status').then(setConn).catch(() => {});
+    } catch (err) { setCleErr(err.message); }
+  }
+  async function revoquerCleConnecteur(c) {
+    if (!window.confirm(`Révoquer la clé « ${c.label} » ? Le connecteur qui l'utilise perdra aussitôt l'accès.`)) return;
+    await api.del(`/connector/keys/${c.id}`); chargerCles(); api.get('/connector/status').then(setConn).catch(() => {});
+  }
+  const basculerDroit = (d) => setCleForm((f) => ({ ...f, droits: f.droits.includes(d) ? f.droits.filter((x) => x !== d) : [...f.droits, d] }));
   async function saveStorage(enabled) { const r = await api.put('/connector/config', { enabled, path: storagePath }); setConn((c) => ({ ...c, storage: r.storage })); }
   async function downloadConnector() {
     const res = await fetch('/api/connector/download', { headers: { Authorization: `Bearer ${getToken()}` } });
@@ -845,21 +865,61 @@ export default function Settings({ onClose, onAccountsChanged }) {
 
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
                 <button className="btn" onClick={downloadConnector}><Icon name="logout" size={15} style={{ transform: 'rotate(90deg)' }} /> Télécharger le connecteur</button>
-                {!conn?.hasKey
-                  ? <button className="btn ghost" onClick={genConnKey}>Générer une clé de connexion</button>
-                  : <button className="btn ghost" onClick={revokeConnKey}>Révoquer la clé</button>}
               </div>
 
               {connKey && (
                 <div className="card" style={{ marginTop: 10, padding: 12 }}>
                   <div className="setting-desc" style={{ margin: '0 0 6px' }}><b>Clé générée — copiez-la maintenant</b> (elle ne sera plus affichée) :</div>
                   <div className="secret-box" style={{ fontSize: 13, wordBreak: 'break-all' }}>{connKey}</div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button className="btn ghost" onClick={() => navigator.clipboard?.writeText(connKey).catch(() => {})}>Copier</button>
+                    <button className="btn ghost" onClick={() => setConnKey('')}>J’ai copié la clé</button>
+                  </div>
                   <div className="setting-desc" style={{ marginTop: 8, marginBottom: 0 }}>Lancez ensuite :<br /><code>node comet-connector.mjs --server {location.origin} --key {connKey.slice(0, 12)}…</code></div>
                 </div>
               )}
-              {conn?.hasKey && !connKey && (
-                <div className="setting-desc" style={{ marginTop: 8 }}>Clé active. Dernière activité du connecteur : <b>{conn.lastSeen ? fmtWhen(conn.lastSeen) : 'jamais connecté'}</b>.</div>
-              )}
+
+              <div style={{ marginTop: 14 }}>
+                <div className="setting-title" style={{ fontSize: 13.5 }}>Clés de connexion</div>
+                <div className="setting-desc">Chaque clé n’ouvre que ce qu’on lui permet. Donnez à chaque connecteur la plus petite liste de droits dont il a besoin : l’export, par exemple, copie toute l’instance, y compris ce qui n’est pas chiffré (notes, contacts, agenda, tâches).</div>
+                <div className="card" style={{ marginTop: 8 }}>
+                  {connCles.length === 0 && <div className="empty" style={{ padding: 12 }}>Aucune clé : le connecteur ne peut pas se raccorder.</div>}
+                  {connCles.map((c) => (
+                    <div key={c.id} className="alias-row" style={{ opacity: c.active ? 1 : 0.55 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{c.label}{!c.active && (c.revoqueeLe ? ' · révoquée' : ' · expirée')}</div>
+                        <div className="hint" style={{ margin: 0 }}>
+                          Droits : {c.droits.join(', ') || 'aucun'} · dernière utilisation : {c.derniereUtilisation ? fmtWhen(c.derniereUtilisation) : 'jamais'}
+                          {c.expireLe ? ` · expire le ${new Date(c.expireLe).toLocaleDateString('fr-FR')}` : ''}
+                        </div>
+                      </div>
+                      {c.active && <button className="btn ghost" onClick={() => revoquerCleConnecteur(c)}>Révoquer</button>}
+                    </div>
+                  ))}
+                </div>
+                <form onSubmit={creerCleConnecteur} style={{ marginTop: 10 }}>
+                  <div className="add-row" style={{ margin: '0 0 6px' }}>
+                    <input placeholder="Nom de la clé (ex. Serveur d’archives)" value={cleForm.label} onChange={(e) => setCleForm({ ...cleForm, label: e.target.value })} />
+                  </div>
+                  <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                    {connDroits.map((d) => (
+                      <label key={d} className="check-row" style={{ margin: 0 }}>
+                        <input type="checkbox" checked={cleForm.droits.includes(d)} onChange={() => basculerDroit(d)} />
+                        <span>{{ export: 'Export de l’instance', visio: 'Salons de visio', ia: 'Assistant IA', 'outils-pro': 'Outils pro' }[d] || d}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="add-row" style={{ margin: '8px 0 0' }}>
+                    <label className="hint" style={{ margin: 0, alignSelf: 'center' }}>Expire le (facultatif)</label>
+                    <input type="date" value={cleForm.expire} onChange={(e) => setCleForm({ ...cleForm, expire: e.target.value })} />
+                    <button className="btn" disabled={!cleForm.droits.length}>Créer la clé</button>
+                  </div>
+                  {cleErr && <div className="alert" style={{ marginTop: 8 }}>{cleErr}</div>}
+                </form>
+                {conn?.hasKey && (
+                  <div className="setting-desc" style={{ marginTop: 8 }}>Dernière activité du connecteur : <b>{conn.lastSeen ? fmtWhen(conn.lastSeen) : 'jamais connecté'}</b>.</div>
+                )}
+              </div>
 
               <div style={{ marginTop: 14 }}>
                 <div className="setting-title" style={{ fontSize: 13.5 }}>Espace de stockage partagé</div>

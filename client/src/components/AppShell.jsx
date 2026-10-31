@@ -260,7 +260,7 @@ export default function AppShell() {
       },
     });
     rtRef.current = rt;
-    initP2P((to, data) => rt.send({ type: 'rtc:signal', to, data }));
+    initP2P((to, data) => rt.send({ type: 'rtc:signal', to, data }), getToken());
     return () => rt.close();
   }, [loadCounts]);
 

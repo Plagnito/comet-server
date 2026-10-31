@@ -56,8 +56,29 @@ const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
 async function api(path, init = {}) {
   const r = await fetch(SERVER + path, { ...init, headers: { ...headers, ...(init.headers || {}) } });
-  if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+  if (!r.ok) {
+    const corps = await r.json().catch(() => ({}));
+    const e = new Error(corps.error ? `${path} → ${corps.error}` : `${path} → HTTP ${r.status}`);
+    e.status = r.status; e.droit = corps.droit;
+    throw e;
+  }
   return r.json();
+}
+
+// Chaque clé n'a que certains droits (export, visio, ia…), choisis par
+// l'administrateur. Une tâche sans son droit est sautée ; un refus n'arrête pas les
+// autres tâches, et on ne le signale qu'une fois.
+const refusSignales = new Set();
+async function tache(nom, droit, droits, fn) {
+  if (droits && !droits.includes(droit)) {
+    if (!refusSignales.has(nom)) { log(`${nom} : sautée, cette clé n'a pas le droit « ${droit} ».`); refusSignales.add(nom); }
+    return;
+  }
+  try { await fn(); refusSignales.delete(nom); } catch (e) {
+    if (e.status === 403) {
+      if (!refusSignales.has(nom)) { log(`${nom} : cette clé n'a pas le droit « ${e.droit || droit} » — tâche sautée.`); refusSignales.add(nom); }
+    } else log(`${nom} : erreur — ${e.message}`);
+  }
 }
 
 async function archive() {
@@ -134,13 +155,20 @@ async function processAi(cfg) {
 }
 
 async function tick() {
-  try {
-    await archive();
-    await autoRooms();
-    let cfg = null; try { cfg = await api('/api/connector/config'); } catch { /* config indisponible ce tour */ }
-    if (cfg) { await ensureStorage(cfg); await pushProTools(cfg); await processAi(cfg); }
-  } catch (e) {
-    log('Erreur :', e.message);
+  let cfg = null;
+  try { cfg = await api('/api/connector/config'); } catch (e) {
+    log('Configuration indisponible :', e.message);
+    if (e.status === 401) return; // clé inconnue, révoquée ou expirée : rien d'autre ne passera
+  }
+  // Un serveur d'une version antérieure ne renvoie pas `droits` : on tente tout.
+  const droits = Array.isArray(cfg?.droits) ? cfg.droits : null;
+  await tache('Archive', 'export', droits, archive);
+  await tache('Salons de visio', 'visio', droits, autoRooms);
+  if (cfg) {
+    await ensureStorage(cfg);
+    // Seulement si le serveur a choisi le connecteur comme source de son parc.
+    if (cfg.protools?.source === 'connector') await tache('Outils pro', 'outils-pro', droits, () => pushProTools(cfg));
+    await tache('Assistant IA', 'ia', droits, () => processAi(cfg));
   }
 }
 

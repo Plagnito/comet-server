@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -8,26 +7,35 @@ import { authRequired } from '../auth.js';
 import { deliverMessage } from '../services/mail.js';
 import { notifyUser } from '../ws.js';
 import { aiProviderState } from './assistant.js';
+import {
+  DROITS, creerCle, verifierCle, journaliser, listerCles, revoquerCle, revoquerToutes, journal, cleActive,
+} from '../services/cles-connecteur.js';
 
 const router = Router();
-const sha = (s) => createHash('sha256').update(String(s)).digest('hex');
 const getS = (k, def = '') => db.prepare('SELECT v FROM settings WHERE k = ?').get(k)?.v ?? def;
 const setS = (k, v) => db.prepare('INSERT INTO settings (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, String(v));
 const all = (sql) => db.prepare(sql).all();
 
-// Authentification par clé de connecteur (générée par un admin)
-function connectorAuth(req, res, next) {
-  const key = req.get('X-Connector-Key') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  const hash = getS('connector_key_hash');
-  if (!hash || !key || sha(key) !== hash) return res.status(401).json({ error: 'Clé de connecteur invalide' });
+// Authentification par clé de connecteur, avec le DROIT que demande la route
+// (services/cles-connecteur.js). 401 : clé inconnue, révoquée ou expirée ; 403 : clé
+// valide mais sans ce droit. Chaque appel accepté est journalisé.
+const connectorAuth = (droit = null) => (req, res, next) => {
+  const claire = req.get('X-Connector-Key') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  const v = verifierCle(claire);
+  if (!v.ok) return res.status(401).json({ error: v.raison });
+  if (droit && !v.cle.droits.includes(droit)) {
+    return res.status(403).json({ error: `Cette clé n’a pas le droit « ${droit} ».`, code: 'droit-manquant', droit });
+  }
+  journaliser(v.cle.id, droit || 'config', req.path, req.ip);
   setS('connector_last_seen', new Date().toISOString());
+  req.cleConnecteur = v.cle;
   next();
-}
+};
 
 // ── Endpoints utilisés par le connecteur (auth par clé) ──────────────────────
 
 // Snapshot complet pour archivage. Messages/chat = ciphertext (serveur aveugle).
-router.get('/export', connectorAuth, (req, res) => {
+router.get('/export', connectorAuth('export'), (req, res) => {
   res.json({
     generatedAt: new Date().toISOString(),
     users: all('SELECT id, email, display_name AS displayName, public_key AS publicKey, is_admin AS isAdmin, created_at AS createdAt FROM users'),
@@ -51,7 +59,7 @@ router.get('/export', connectorAuth, (req, res) => {
 });
 
 // Création automatique de salons de conférence pour les événements à venir.
-router.post('/process', connectorAuth, (req, res) => {
+router.post('/process', connectorAuth('visio'), (req, res) => {
   const sys = db.prepare('SELECT id FROM users WHERE email = ?').get(SYSTEM_EMAIL);
   const due = db.prepare('SELECT * FROM events WHERE is_conference = 1 AND room_announced = 0').all();
   const now = Date.now();
@@ -80,19 +88,23 @@ router.post('/process', connectorAuth, (req, res) => {
   res.json({ announced });
 });
 
-router.get('/config', connectorAuth, (req, res) => {
+// Toute clé valide lit la configuration, mais seulement ce qui concerne ses droits :
+// le connecteur saute alors les tâches qu'il n'a pas le droit de faire.
+router.get('/config', connectorAuth(), (req, res) => {
+  const droits = req.cleConnecteur.droits;
   res.json({
+    droits,
     storage: { enabled: getS('storage_enabled') === '1', path: getS('storage_path') },
     protools: { source: 'aucune' },
     // Assistant IA : indique au connecteur s'il doit traiter les questions.
-    ai: { enabled: getS('ai_enabled') === '1' },
+    ai: { enabled: droits.includes('ia') && getS('ai_enabled') === '1' },
   });
 });
 
 // ── Assistant IA (file de travaux) ───────────────────────────────────────────
 // Le connecteur récupère les questions en attente, appelle l'IA locale de l'org,
 // puis renvoie les réponses. Les travaux « claimed » bloqués > 3 min repassent en file.
-router.get('/ai/pending', connectorAuth, (req, res) => {
+router.get('/ai/pending', connectorAuth('ia'), (req, res) => {
   // Le connecteur annonce s'il a bien un fournisseur IA (--ai-url). Un connecteur
   // d'une version antérieure n'envoie pas ce paramètre : il n'atteignait cet
   // endpoint QUE lorsqu'il avait une URL d'IA, on le considère donc prêt.
@@ -114,7 +126,7 @@ router.get('/ai/pending', connectorAuth, (req, res) => {
   res.json({ jobs });
 });
 
-router.post('/ai/answer', connectorAuth, (req, res) => {
+router.post('/ai/answer', connectorAuth('ia'), (req, res) => {
   const { jobId, answer, error } = req.body || {};
   const j = db.prepare('SELECT * FROM ai_jobs WHERE id = ?').get(jobId);
   if (!j) return res.status(404).json({ error: 'Travail introuvable' });
@@ -131,21 +143,40 @@ router.use((req, res, next) => { if (!req.user.is_admin) return res.status(403).
 
 router.get('/status', (req, res) => {
   res.json({
-    hasKey: !!getS('connector_key_hash'),
+    hasKey: cleActive(),
     lastSeen: getS('connector_last_seen') || null,
     storage: { enabled: getS('storage_enabled') === '1', path: getS('storage_path') },
     ai: aiProviderState(), // état réel du moteur IA, affiché tel quel dans les réglages
+    droits: DROITS,
   });
 });
 
+// Clés : liste (jamais le hachage), création (la clé en clair n'est rendue qu'ici, une
+// fois), révocation, journal des derniers appels.
+router.get('/keys', (req, res) => res.json({ cles: listerCles(), droits: DROITS }));
+router.post('/keys', (req, res) => {
+  try {
+    const { label, droits, expireLe } = req.body || {};
+    const { cle, ligne } = creerCle({ label, droits, expireLe, par: req.user.id });
+    res.status(201).json({ key: cle, cle: ligne });
+  } catch (e) { res.status(e.statut || 500).json({ error: e.message }); }
+});
+router.delete('/keys/:id', (req, res) => {
+  if (!revoquerCle(req.params.id)) return res.status(404).json({ error: 'Clé introuvable ou déjà révoquée' });
+  res.json({ ok: true });
+});
+router.get('/audit', (req, res) => res.json({ journal: journal(req.query.limite) }));
+
+// Anciennes routes, gardées compatibles : une clé à TOUS les droits, et la révocation
+// de toutes les clés.
 router.post('/key', (req, res) => {
-  const key = `cmtk_${randomBytes(24).toString('base64url')}`;
-  setS('connector_key_hash', sha(key));
-  res.json({ key }); // affiché une seule fois
+  const { cle } = creerCle({ label: 'Connecteur', droits: DROITS, par: req.user.id });
+  res.json({ key: cle }); // affiché une seule fois
 });
 
 router.delete('/key', (req, res) => {
-  db.prepare("DELETE FROM settings WHERE k IN ('connector_key_hash', 'connector_last_seen')").run();
+  revoquerToutes();
+  db.prepare("DELETE FROM settings WHERE k = 'connector_last_seen'").run();
   res.json({ ok: true });
 });
 

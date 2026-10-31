@@ -15,6 +15,7 @@ import { startUpdater, localCommit } from './services/updater.js';
 import { startReminderScheduler } from './services/reminders.js';
 import { attachWebSocket } from './ws.js';
 import authRoutes from './routes/auth.js';
+import { configurationIce, demandeAutorisee } from './services/ice.js';
 import userRoutes from './routes/users.js';
 import mailRoutes from './routes/mail.js';
 import calendarRoutes from './routes/calendar.js';
@@ -157,15 +158,11 @@ app.get('/api/health', (req, res) => res.json({ ok: true, app: 'comet', time: ne
 const COMMIT = localCommit() || 'dev';
 app.get('/api/version', (req, res) => res.json({ commit: COMMIT }));
 
-// Config ICE pour le P2P (WebRTC). Privacy-first : aucun serveur tiers par défaut.
-// Renseignez COMET_STUN / COMET_TURN (idéalement votre propre coturn) pour le P2P hors-LAN.
+// Config ICE pour le P2P (WebRTC). Aucun serveur tiers par défaut ; le relais TURN n'est
+// donné qu'aux sessions valides (services/ice.js).
 app.get('/api/rtc-config', (req, res) => {
-  const iceServers = [];
-  if (process.env.COMET_STUN) iceServers.push({ urls: process.env.COMET_STUN });
-  if (process.env.COMET_TURN) {
-    iceServers.push({ urls: process.env.COMET_TURN, username: process.env.COMET_TURN_USER || '', credential: process.env.COMET_TURN_PASS || '' });
-  }
-  res.json({ iceServers });
+  res.set('Cache-Control', 'no-store');
+  res.json(configurationIce({ turn: demandeAutorisee(req) }));
 });
 
 app.use('/api/auth', authRoutes);

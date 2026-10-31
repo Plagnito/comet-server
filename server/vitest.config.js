@@ -12,6 +12,12 @@ export default defineConfig({
     fileParallelism: false,
     maxWorkers: 1,
     minWorkers: 1,
+    // Les tests tournent sur un runner auto-hébergé qui partage le PC avec la
+    // construction de l'app de bureau, lancée par le même push : un test qui prend 1 s
+    // au repos en a pris 8. Les 5 s par défaut faisaient rougir la suite au hasard ;
+    // 20 s laissent la marge sans masquer un vrai blocage.
+    testTimeout: 20_000,
+    hookTimeout: 30_000,
     // La règle qui décide ce qu'un courrier venu du dehors a le droit d'aller chercher
     // sur le réseau vit dans le client (`client/src/mailhtml.js`), et elle DOIT être
     // testée : un pixel espion est invisible à l'œil, sa panne ne se verrait jamais à

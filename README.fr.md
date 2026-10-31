@@ -162,6 +162,11 @@ Tout est décrit dans [`server/.env.example`](server/.env.example) : inscription
 publique, comptes Gmail/Outlook en un clic, serveur TURN pour la visio à travers Internet,
 notifications bureau. Rien n'est obligatoire avec Docker.
 
+**Sauvegardes :** `node scripts/sauvegarde.mjs <dossier-vide>` fait une copie cohérente de la
+base et des pièces jointes pendant que le serveur tourne ; `node scripts/restauration.mjs
+<dossier>` la vérifie et la remet. Gardez `JWT_SECRET` et `COMET_MAIL_SECRET` à part : ils ne
+sont pas dans la sauvegarde. Détails (en anglais) : [`docs/backup.md`](docs/backup.md).
+
 ## Développement
 
 ```bash

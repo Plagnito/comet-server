@@ -1,8 +1,8 @@
 // Conférence pair-à-pair (mesh WebRTC). Les flux audio/vidéo circulent directement
 // entre participants ; le serveur ne sert que de relais de signaling (SDP/ICE).
 // Modèle anti-collision : le nouvel arrivant initie les offres vers les pairs déjà présents.
-
-const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }];
+// Serveurs STUN/TURN : ceux de l'instance (ice.js), jamais un service tiers écrit en dur.
+import { chargerIce } from './ice.js';
 
 export const VIDEO_CONSTRAINTS = {
   '1080p': { width: { ideal: 1920, max: 1920 }, height: { ideal: 1080, max: 1080 }, frameRate: { max: 30 } },
@@ -40,6 +40,7 @@ export class Conference {
     if (config) this.config = { ...this.config, ...config };
     this.localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints(this.config));
     this.onEvent({ type: 'local', stream: this.localStream });
+    this.ice = await chargerIce(this.token);
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     // Jeton dans le premier message, jamais dans l'adresse (journaux du tunnel, du proxy).
@@ -57,7 +58,7 @@ export class Conference {
   _activeVideoTrack() { return this.screenStream ? this.screenStream.getVideoTracks()[0] : this.localStream?.getVideoTracks()[0]; }
 
   _newPc(peerId) {
-    const pc = new RTCPeerConnection({ iceServers: ICE });
+    const pc = new RTCPeerConnection({ iceServers: this.ice || [] });
     for (const t of this.localStream.getTracks()) pc.addTrack(t, this.localStream);
     // Si un partage d'écran est en cours, le nouveau pair le reçoit aussi.
     if (this.screenStream) { const s = this._videoSender(pc); if (s) s.replaceTrack(this.screenStream.getVideoTracks()[0]); }
