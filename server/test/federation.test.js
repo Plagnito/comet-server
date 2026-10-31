@@ -20,7 +20,7 @@ import request from 'supertest';
 
 import * as cc from '../../client/src/crypto.js';
 import { app } from '../src/server.js';
-import { chaineCanonique, digestDe, nouveauNonce, signer, texteRotation, empreinte } from '../src/federation/signature.js';
+import { chaineCanonique, digestDe, nouveauNonce, signer, texteRotation, empreinte, suivreRotations } from '../src/federation/signature.js';
 import { appeler, estAdressePrivee } from '../src/federation/reseau.js';
 
 const ICI = dirname(fileURLToPath(import.meta.url));
@@ -398,5 +398,76 @@ describe('fédération — garde-fous réseau', () => {
     try {
       await expect(appeler(`http://127.0.0.1:${srv.address().port}/.well-known/comet`, { autoriserPrive: true })).rejects.toThrow(/redirection/);
     } finally { await new Promise((r) => srv.close(r)); }
+  });
+});
+
+// ── C-17 : la chaîne de rotations va jusqu'à l'appareil ─────────────────────
+// Autrefois, un serveur qui acceptait la rotation d'un pair en jetait la preuve : l'appareil
+// qui avait retenu l'ancienne clé recevait ensuite des clés signées par une clé inconnue,
+// sans rien pour relier les deux, et l'envoi était bloqué. Et deux rotations entre deux
+// contacts gelaient le pair (seule la dernière étape était publiée).
+describe('fédération — chaîne de rotations (C-17)', () => {
+  const etape = (domaine, de, vers, date = new Date().toISOString()) => ({ ancienne: de.pub, nouvelle: vers.pub, date, signature: signer(de.priv, texteRotation({ domaine, nouvelle: vers.pub, date })) });
+
+  it('même règle côté serveur et côté appareil : chemin vérifié, branche, boucle, maillon faux', async () => {
+    const d = 'serveur-x.test'; const [k0, k1, k2, k3, intrus] = [paireEd(), paireEd(), paireEd(), paireEd(), paireEd()];
+    const cas = [
+      { etapes: [etape(d, k1, k2), etape(d, k0, k1)], de: k0, vers: k2, attendu: 2 },                       // ordre quelconque
+      { etapes: [etape(d, k0, k3), etape(d, k0, k1), etape(d, k1, k2)], de: k0, vers: k2, attendu: 2 },     // branche morte ignorée
+      { etapes: [etape(d, k0, k1), etape(d, k1, k0)], de: k0, vers: k2, attendu: -1 },                      // boucle, pas d'issue
+      { etapes: [etape(d, k0, k1), etape(d, intrus, k2)], de: k0, vers: k2, attendu: -1 },                  // maillon signé par un tiers
+      { etapes: [etape('autre.test', k0, k1), etape(d, k1, k2)], de: k0, vers: k2, attendu: -1 },           // preuve d'un autre domaine
+      { etapes: [{ ...etape(d, k0, k1), nouvelle: k2.pub }], de: k0, vers: k2, attendu: -1 },               // nouvelle clé substituée
+      { etapes: [], de: k0, vers: k0, attendu: 0 },
+    ];
+    for (const c of cas) {
+      const serveur = suivreRotations({ domaine: d, depuis: c.de.pub, jusqua: c.vers.pub, etapes: c.etapes });
+      expect(serveur === null ? -1 : serveur.length).toBe(c.attendu);
+      expect(await cc.suivreRotationsServeur(d, c.de.pub, c.vers.pub, c.etapes)).toBe(c.attendu);
+    }
+  });
+
+  it('B change deux fois de clé : A suit la chaîne, et l’appareil qui a retenu la première clé aussi', async () => {
+    const adresse = 'dominique@serveur-b.test';
+    const resoudre = async () => {
+      const r = await api(S.a, 'GET', `/users/recipients?emails=${encodeURIComponent(adresse)}`, camille.jeton);
+      expect(r.statut, r.texte).toBe(200);
+      return r.json;
+    };
+    const avant = (await fetch(`${S.b.url}/.well-known/comet`).then((x) => x.json())).cle;
+    expect((await resoudre()).recipients.find((x) => x.email === adresse).federe.serveur.cle).toBe(avant);
+
+    for (let i = 0; i < 2; i++) expect((await api(S.b, 'POST', '/federation/identite/rotation', dominique.jeton)).statut).toBe(200);
+    const doc = await fetch(`${S.b.url}/.well-known/comet`).then((x) => x.json());
+    expect(doc.cle).not.toBe(avant);
+    expect(doc.chaine.length).toBeGreaterThanOrEqual(2);
+
+    const apres = await resoudre();
+    expect(apres.federationErrors, JSON.stringify(apres)).toEqual([]);   // A n'a pas gelé B
+    const dest = apres.recipients.find((x) => x.email === adresse);
+    expect(dest.federe.serveur.cle).toBe(doc.cle);
+    expect(dest.federe.serveur.rotations.length).toBeGreaterThanOrEqual(2);
+
+    // L'appareil de Camille, qui avait retenu la clé d'avant les deux rotations.
+    const stockage = new Map();
+    globalThis.localStorage = { getItem: (k) => stockage.get(k) ?? null, setItem: (k, v) => stockage.set(k, v), removeItem: (k) => stockage.delete(k) };
+    const { verifierDestinatairesFederes } = await import('../../client/src/federation.js');
+    const retenir = (cle) => stockage.set('comet.fed.serveurs', JSON.stringify({ [S.b.domaine]: cle }));
+    retenir(avant);
+    const v = await verifierDestinatairesFederes([dest]);
+    expect(v.erreurs).toEqual([]);
+    expect(v.avertissements.join(' ')).toMatch(/2 fois/);
+    expect(JSON.parse(stockage.get('comet.fed.serveurs'))[S.b.domaine]).toBe(doc.cle);  // l'appareil retient la nouvelle
+
+    // Un appareil qui a retenu une autre clé : aucun chemin, envoi bloqué.
+    retenir(paireEd().pub);
+    expect((await verifierDestinatairesFederes([dest])).erreurs).toHaveLength(1);
+    // Une chaîne trafiquée par le serveur relais (une signature abîmée) : bloqué aussi.
+    retenir(avant);
+    const trafique = structuredClone(dest);
+    const s = trafique.federe.serveur.rotations[0].signature;
+    trafique.federe.serveur.rotations[0].signature = (s[0] === 'A' ? 'B' : 'A') + s.slice(1);
+    trafique.federe.serveur.rotation = null;
+    expect((await verifierDestinatairesFederes([trafique])).erreurs).toHaveLength(1);
   });
 });

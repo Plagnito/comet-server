@@ -38,12 +38,14 @@ function senderView(id) {
 function applyFrom(sender, fromEmail, extFromName = null) {
   if (!sender) return sender;
   if (!fromEmail && !extFromName) return sender;
-  return {
+  const vue = {
     ...sender,
     email: fromEmail || sender.email,
     displayName: extFromName || sender.displayName,
     external: !!extFromName,
   };
+  if (extFromName) delete vue.cle; // courrier du dehors : la clé n'est pas celle de l'expéditeur réel
+  return vue;
 }
 
 // Valide une adresse « De » : l'email principal du compte (→ NULL, défaut) ou un de
@@ -70,11 +72,17 @@ function senderMapFor(ids) {
   const uniq = [...new Set(ids.filter(Boolean))];
   if (!uniq.length) return map;
   const ph = uniq.map(() => '?').join(',');
-  for (const u of db.prepare(`SELECT id, email, display_name, avatar_color, distant_domaine, public_key, cle_changee_le FROM users WHERE id IN (${ph})`).all(...uniq)) {
+  for (const u of db.prepare(`SELECT id, email, display_name, avatar_color, distant_domaine, public_key, cle_changee_le, is_system, is_box FROM users WHERE id IN (${ph})`).all(...uniq)) {
     const s = { id: u.id, email: u.email, displayName: u.display_name, avatarColor: u.avatar_color };
     // Correspondant d'un autre serveur Comet : de quoi afficher le badge et calculer le
     // numéro de sécurité (sa clé publique), et avertir si elle a changé.
     if (u.distant_domaine) s.federe = { domaine: u.distant_domaine, publicKey: u.public_key || null, cleChangeeLe: u.cle_changee_le || null };
+    // Compte de CE serveur : sa clé et l'adresse PRINCIPALE du compte, pour le même numéro
+    // de sécurité. Sans lui, rien ne permettait de vérifier qu'un serveur n'a pas remis sa
+    // propre clé à la place de celle d'un collègue. (Adresse principale et non celle
+    // affichée : un message parti d'un alias montre l'alias, et le numéro doit être
+    // calculé sur les mêmes adresses des deux côtés.)
+    else if (u.public_key && !u.is_system && !u.is_box) s.cle = { adresse: u.email, publicKey: u.public_key };
     map.set(u.id, s);
   }
   return map;

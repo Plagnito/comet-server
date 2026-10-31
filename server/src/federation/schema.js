@@ -29,6 +29,20 @@ db.exec(`
     vu_dernier     TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  -- Rotations de clé acceptées pour chaque serveur distant, preuves comprises. On les
+  -- GARDE et on les transmet aux appareils : un appareil qui a retenu une ancienne clé de
+  -- ce serveur doit pouvoir vérifier lui-même le chemin jusqu'à la clé actuelle, sans
+  -- croire notre serveur sur parole.
+  CREATE TABLE IF NOT EXISTS federation_rotations (
+    domaine    TEXT NOT NULL,
+    ancienne   TEXT NOT NULL,
+    nouvelle   TEXT NOT NULL,
+    date       TEXT NOT NULL,
+    signature  TEXT NOT NULL,
+    recue_le   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (domaine, ancienne, nouvelle)
+  );
+
   -- Anti-rejeu : nonces déjà acceptés, par serveur émetteur, gardés quelques minutes.
   CREATE TABLE IF NOT EXISTS federation_nonces (
     emetteur  TEXT NOT NULL,

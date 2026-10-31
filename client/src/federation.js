@@ -5,7 +5,7 @@
 // clé de serveur-b.fr sur cet appareil (premier contact). Ensuite, si notre propre serveur
 // présentait une AUTRE clé pour serveur-b.fr — sans rotation signée par l'ancienne —
 // l'envoi est refusé : il faudrait soit une rotation légitime, soit une substitution.
-import { verifierEnregistrementCle, verifierRotationServeur } from './crypto.js';
+import { verifierEnregistrementCle, suivreRotationsServeur } from './crypto.js';
 
 const CLE_SERVEURS = 'comet.fed.serveurs';   // domaine → clé Ed25519 retenue
 const CLE_VERIFIES = 'comet.fed.verifies';   // « adresse|clé » → date de vérification
@@ -29,8 +29,15 @@ export async function verifierDestinatairesFederes(destinataires) {
     }
     const retenue = serveurs[domaine];
     if (retenue && retenue !== cleServeur) {
-      if (await verifierRotationServeur(domaine, retenue, cleServeur, f.serveur.rotation)) {
-        avertissements.push(`Le serveur ${domaine} a changé de clé (rotation signée par l'ancienne).`);
+      // Toutes les rotations connues de notre serveur, plus la dernière au format d'origine
+      // (sans `nouvelle`) : l'appareil remonte lui-même de sa clé retenue à la clé actuelle.
+      const etapes = [...(f.serveur.rotations || [])];
+      if (f.serveur.rotation) etapes.push({ ...f.serveur.rotation, nouvelle: cleServeur });
+      const n = await suivreRotationsServeur(domaine, retenue, cleServeur, etapes);
+      if (n > 0) {
+        avertissements.push(n > 1
+          ? `Le serveur ${domaine} a changé ${n} fois de clé depuis votre dernier échange (chaque changement signé par la clé précédente).`
+          : `Le serveur ${domaine} a changé de clé (rotation signée par l'ancienne).`);
       } else {
         erreurs.push(`La clé du serveur ${domaine} n'est plus celle que cet appareil connaît, sans preuve de rotation. Envoi bloqué : vérifiez auprès de votre administrateur.`);
         continue;

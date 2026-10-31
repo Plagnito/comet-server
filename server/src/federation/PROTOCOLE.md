@@ -24,16 +24,25 @@ GET https://serveur-b.fr/.well-known/comet
   "cle": "<SPKI DER base64>",
   "empreinte": "4F2A 91C0 …",            // SHA-256 de la clé, 8 groupes de 4 hexa
   "api": "https://serveur-b.fr/api/federation/v1",
-  "rotation": null | { "ancienne": "<clé>", "date": "<ISO>", "signature": "<base64>" }
+  "rotation": null | { "ancienne": "<clé>", "date": "<ISO>", "signature": "<base64>" },
+  "chaine": [ { "ancienne": "<clé>", "nouvelle": "<clé>", "date": "<ISO>", "signature": "<base64>" }, … ]
 }
 ```
+
+`chaine` : toutes les rotations du serveur, de la plus ancienne à la plus récente (50 au
+plus sont lues). `rotation` reste publié pour les lecteurs qui ne connaissent que lui.
 
 Le lecteur exige `domaine` = le domaine demandé et `api` sur la même origine que le document.
 
 - **Premier contact** : la clé est mémorisée (`federation_pairs`, TOFU).
-- **Rotation** : `rotation.signature` = signature par l'ANCIENNE clé de
-  `comet-rotation-v1\n<domaine>\n<nouvelle clé>\n<date>`. Acceptée sans intervention si
-  `ancienne` est la clé mémorisée.
+- **Rotation** : chaque étape est signée par son ANCIENNE clé :
+  `comet-rotation-v1\n<domaine>\n<nouvelle clé>\n<date>`. Acceptée sans intervention s'il
+  existe un chemin d'étapes valides de la clé mémorisée à la clé publiée (plusieurs
+  rotations entre deux contacts passent). Les étapes acceptées sont **gardées**
+  (`federation_rotations`) et transmises aux appareils avec chaque clé de compte de ce
+  serveur (`federe.serveur.rotations`) : un appareil qui a retenu une ancienne clé remonte
+  lui-même le chemin, avec la même règle (`suivreRotations` côté serveur,
+  `suivreRotationsServeur` côté appareil).
 - **Clé changée sans rotation valide** : le pair passe en `cle_changee`, tout est refusé
   jusqu'à ce que l'admin recopie l'empreinte de la nouvelle clé (comparée hors bande).
 
@@ -117,4 +126,7 @@ l'ordre croissant. Les deux personnes voient le même numéro.
 - Métadonnées visibles des deux serveurs : qui écrit à qui, quand, taille.
 - Premier contact : TLS + TOFU, tant que le numéro de sécurité n'est pas comparé.
 - Pas de confidentialité persistante (clés RSA statiques des comptes).
+- Expéditeur non signé : le serveur émetteur garantit le « De » de ses comptes. Le numéro de
+  sécurité vérifie les clés, pas l'auteur d'un message. Décisions et pistes :
+  [`docs/security-model.md`](../../../docs/security-model.md).
 - v1 : ni pièces jointes, ni envoi programmé, ni messages éphémères vers un autre serveur.

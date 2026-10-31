@@ -43,6 +43,15 @@ export function identite() {
 }
 
 export const signerAvecIdentite = (texte) => signer(identite().clePrivee, texte);
+
+// Toutes les rotations de CE serveur, de la plus ancienne à la plus récente, preuves
+// comprises : publiées pour qu'un pair ou un appareil qui a retenu une clé de plusieurs
+// rotations en arrière puisse remonter jusqu'à la clé actuelle.
+export function chaineDeRotation() {
+  return db.prepare('SELECT cle_publique, rotation FROM federation_identite WHERE rotation IS NOT NULL ORDER BY id').all()
+    .map((l) => { try { const r = JSON.parse(l.rotation); return { ancienne: r.ancienne, nouvelle: l.cle_publique, date: r.date, signature: r.signature }; } catch { return null; } })
+    .filter(Boolean);
+}
 export const empreinteLocale = () => empreinte(identite().clePublique);
 
 // Rotation : nouvelle paire, annoncée avec une preuve signée par l'ancienne. Les pairs qui

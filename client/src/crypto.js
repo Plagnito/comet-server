@@ -197,6 +197,33 @@ export const verifierRotationServeur = (domaine, ancienne, nouvelle, rotation) =
     ? verifierEd25519(ancienne, texteRotation({ domaine, nouvelle, date: rotation.date }), rotation.signature)
     : Promise.resolve(false);
 
+// Chaîne de rotations d'un serveur : de la clé que cet appareil a retenue (`depuis`) à la
+// clé présentée (`jusqua`), chaque étape { ancienne, nouvelle, date, signature } signée par
+// son ancienne clé. Rend le nombre d'étapes du chemin, ou -1 s'il n'y en a pas. Même règle,
+// à l'identique, que server/src/federation/signature.js (suivreRotations).
+export const ROTATIONS_MAX = 50;
+export async function suivreRotationsServeur(domaine, depuis, jusqua, etapes) {
+  if (!depuis || !jusqua) return -1;
+  if (depuis === jusqua) return 0;
+  const valides = (Array.isArray(etapes) ? etapes : []).slice(0, ROTATIONS_MAX * 4).filter((e) => e
+    && typeof e.ancienne === 'string' && typeof e.nouvelle === 'string' && typeof e.date === 'string'
+    && typeof e.signature === 'string' && e.ancienne !== e.nouvelle);
+  const vues = new Set();
+  const chercher = async (cle, profondeur) => {
+    if (cle === jusqua) return 0;
+    if (profondeur >= ROTATIONS_MAX || vues.has(cle)) return -1;
+    vues.add(cle);
+    for (const e of valides) {
+      if (e.ancienne !== cle) continue;
+      if (!(await verifierEd25519(e.ancienne, texteRotation({ domaine, nouvelle: e.nouvelle, date: e.date }), e.signature))) continue;
+      const suite = await chercher(e.nouvelle, profondeur + 1);
+      if (suite >= 0) return suite + 1;
+    }
+    return -1;
+  };
+  return chercher(depuis, 0);
+}
+
 // Numéro de sécurité de deux correspondants (60 chiffres, 12 groupes de 5). Chacun apporte
 // 30 chiffres tirés de SA clé et de SON adresse (SHA-512 itéré, à la manière de Signal) ;
 // les deux moitiés sont rangées dans un ordre fixe, si bien que les deux personnes voient

@@ -107,6 +107,13 @@ For now the app is built from this repository: `npm install` at the root, then
   the network, as it does everywhere else. Comet flags every such message.
 - Files larger than 50 MB are sent **unencrypted** (hosted by the server and shared as a
   web-seeded torrent). The interface warns you before sending.
+- **The server distributes public keys, and messages are not signed by their sender.** A
+  malicious server could hand out its own key in place of a correspondent's: compare the
+  **safety number** (on any message from another Comet account, same server or not) before
+  trusting anyone with something sensitive.
+- **No forward secrecy yet:** account keys are static, so someone who later obtains an
+  account's private key can read that account's stored encrypted mail. Details and the
+  decisions behind both limits: [`docs/security-model.md`](docs/security-model.md).
 
 ## Writing to other Comet servers (federation)
 

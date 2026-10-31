@@ -7,9 +7,9 @@ import {
 } from './config.js';
 import { appeler, lireJson, ErreurReseau } from './reseau.js';
 import {
-  chaineCanonique, verifier, digestCorrespond, digestDe, nouveauNonce, texteRotation, empreinte,
+  chaineCanonique, verifier, digestCorrespond, digestDe, nouveauNonce, empreinte, suivreRotations, ROTATIONS_MAX,
 } from './signature.js';
-import { identite, signerAvecIdentite } from './identite.js';
+import { identite, signerAvecIdentite, chaineDeRotation } from './identite.js';
 import './schema.js';
 
 export class ErreurFederation extends Error {
@@ -66,7 +66,9 @@ export async function decouvrir(domaine, { forcer = false } = {}) {
   if (String(doc.domaine || '').toLowerCase() !== domaine) throw new ErreurFederation(`Le serveur ${domaine} se présente sous un autre nom.`, 'document', 502);
   if (!estCleEd25519(doc.cle)) throw new ErreurFederation(`Clé de ${domaine} invalide.`, 'document', 502);
   if (!api || api.origin !== origine) throw new ErreurFederation(`Adresse de livraison de ${domaine} hors de son hôte.`, 'document', 502);
-  const propre = { domaine, cle: doc.cle, api: api.href.replace(/\/+$/, ''), rotation: doc.rotation || null, autoriserPrive };
+  // La chaîne publiée ne vaut rien en soi : chaque étape est vérifiée quand on s'en sert.
+  const chaine = Array.isArray(doc.chaine) ? doc.chaine.slice(-ROTATIONS_MAX) : [];
+  const propre = { domaine, cle: doc.cle, api: api.href.replace(/\/+$/, ''), rotation: doc.rotation || null, chaine, autoriserPrive };
   cacheDoc.set(domaine, { doc: propre, quand: Date.now() });
   return propre;
 }
@@ -84,11 +86,24 @@ export function refusPolitique(domaine) {
   return null;
 }
 
-function verifierRotation(domaine, ancienne, doc) {
-  const r = doc.rotation;
-  return !!(r && r.ancienne === ancienne && typeof r.date === 'string'
-    && verifier(ancienne, texteRotation({ domaine, nouvelle: doc.cle, date: r.date }), r.signature));
+// Chemin de rotations vérifié de la clé mémorisée à la clé publiée (null s'il n'y en a pas).
+// On prend la chaîne complète publiée par le serveur distant, plus sa dernière étape au
+// format d'origine (`rotation` sans `nouvelle`), pour les serveurs qui ne publient qu'elle.
+function cheminRotation(domaine, ancienne, doc) {
+  const etapes = [...(doc.chaine || [])];
+  if (doc.rotation) etapes.push({ ...doc.rotation, nouvelle: doc.cle });
+  return suivreRotations({ domaine, depuis: ancienne, jusqua: doc.cle, etapes });
 }
+
+// Étapes de rotation acceptées pour un domaine, dans l'ordre où on les a reçues. Elles
+// partent avec chaque clé de correspondant de ce domaine : l'appareil en a besoin s'il a
+// retenu une ancienne clé du serveur.
+export const rotationsConnues = (domaine) => db.prepare(
+  'SELECT ancienne, nouvelle, date, signature FROM federation_rotations WHERE domaine = ? ORDER BY recue_le, rowid',
+).all(String(domaine).toLowerCase()).slice(-ROTATIONS_MAX);
+const retenirRotation = (domaine, e) => db.prepare(
+  'INSERT OR IGNORE INTO federation_rotations (domaine, ancienne, nouvelle, date, signature) VALUES (?, ?, ?, ?, ?)',
+).run(domaine, e.ancienne, e.nouvelle, e.date, e.signature);
 
 /**
  * Clé et adresse d'API d'un serveur distant, avec TOFU et rotation.
@@ -115,7 +130,9 @@ export async function etablir(domaine, { forcer = false } = {}) {
     db.prepare("UPDATE federation_pairs SET api = ?, etat = 'actif', cle_proposee = NULL, vu_dernier = datetime('now') WHERE domaine = ?").run(doc.api, domaine);
     return doc;
   }
-  if (connu.etat === 'actif' && verifierRotation(domaine, connu.cle, doc)) {
+  const chemin = connu.etat === 'actif' ? cheminRotation(domaine, connu.cle, doc) : null;
+  if (chemin) {
+    for (const e of chemin) retenirRotation(domaine, e);
     db.prepare("UPDATE federation_pairs SET cle = ?, api = ?, cle_proposee = NULL, note = ?, vu_dernier = datetime('now') WHERE domaine = ?")
       .run(doc.cle, doc.api, `Rotation signée acceptée le ${new Date().toISOString()}`, domaine);
     return doc;
@@ -217,5 +234,6 @@ export function documentPublic(baseUrl) {
     empreinte: empreinte(id.clePublique),
     api: `${baseUrl}/api/federation/v1`,
     rotation: id.rotation,
+    chaine: chaineDeRotation(),
   };
 }

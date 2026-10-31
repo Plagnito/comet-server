@@ -12,7 +12,7 @@ import { deliverMessage } from '../services/mail.js';
 import {
   domaineLocal, federationActive, decouper, adresseFederee, DOMAINE_INTERNE, LIMITES, estDomaineDistant,
 } from './config.js';
-import { ErreurFederation, appelSigne, etablir } from './pairs.js';
+import { ErreurFederation, appelSigne, etablir, rotationsConnues } from './pairs.js';
 import { signerAvecIdentite, identite } from './identite.js';
 import { texteCle, verifier, empreinte } from './signature.js';
 import './schema.js';
@@ -128,7 +128,11 @@ export async function resoudreDistants(adresses) {
           federe: {
             domaine,
             nom: u.display_name,
-            serveur: { cle: serveur.cle, empreinte: empreinte(serveur.cle), rotation: serveur.rotation || null },
+            // `rotations` : toutes les rotations de ce serveur que nous avons acceptées, preuves
+            // comprises. L'appareil qui a retenu une ancienne clé de ce serveur remonte lui-même
+            // le chemin jusqu'à la clé actuelle (autrefois, seule la rotation du jour de la
+            // découverte partait, puis plus rien : l'appareil restait bloqué).
+            serveur: { cle: serveur.cle, empreinte: empreinte(serveur.cle), rotation: serveur.rotation || null, rotations: rotationsConnues(domaine) },
             enregistrement: { adresse: enr.adresse, cle: enr.cle, date: enr.date, signature: enr.signature },
             cleChangeeLe: u.cle_changee_le || null,
           },

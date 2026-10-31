@@ -110,6 +110,13 @@ puis `npm run dist` (installateurs dans `release/`).
   clair du réseau, comme partout ailleurs. Comet le signale sur chaque message concerné.
 - Les fichiers de plus de 50 Mo sont transmis **non chiffrés** (hébergés par le serveur et
   partagés en torrent web-seed). L'interface prévient avant l'envoi.
+- **Le serveur distribue les clés publiques, et un message n'est pas signé par son
+  expéditeur.** Un serveur malveillant pourrait remettre sa propre clé à la place de celle
+  d'un correspondant : comparez le **numéro de sécurité** (sur tout message d'un autre compte
+  Comet, du même serveur ou non) avant de confier quelque chose de sensible.
+- **Pas encore de confidentialité persistante :** les clés des comptes sont fixes ; qui
+  obtiendrait plus tard la clé privée d'un compte lirait son courrier chiffré encore stocké.
+  Détails et décisions (en anglais) : [`docs/security-model.md`](docs/security-model.md).
 
 ## Écrire aux autres serveurs Comet (fédération)
 

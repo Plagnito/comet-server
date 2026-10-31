@@ -65,3 +65,31 @@ export function empreinte(clePubliqueB64) {
 export const texteCle = ({ adresse, cle, date }) => ['comet-cle-v1', String(adresse).toLowerCase(), cle, date].join('\n');
 // Rotation : la NOUVELLE clé du domaine, signée par l'ANCIENNE.
 export const texteRotation = ({ domaine, nouvelle, date }) => ['comet-rotation-v1', String(domaine).toLowerCase(), nouvelle, date].join('\n');
+
+// Chaîne de rotations : relie une clé connue (`depuis`) à la clé présentée (`jusqua`) par
+// des étapes { ancienne, nouvelle, date, signature }, chacune signée par son ANCIENNE clé.
+// Rend les étapes du chemin trouvé, ou null. Un parcours en profondeur suffit : si une
+// ancienne clé a signé deux successeurs, seul celui qui mène à la clé présentée compte.
+// Même règle, à l'identique, côté appareil (client/src/crypto.js : suivreRotationsServeur).
+export const ROTATIONS_MAX = 50;
+export function suivreRotations({ domaine, depuis, jusqua, etapes, verifierSignature = verifier }) {
+  if (!depuis || !jusqua) return null;
+  if (depuis === jusqua) return [];
+  const valides = (Array.isArray(etapes) ? etapes : []).slice(0, ROTATIONS_MAX * 4).filter((e) => e
+    && typeof e.ancienne === 'string' && typeof e.nouvelle === 'string' && typeof e.date === 'string'
+    && typeof e.signature === 'string' && e.ancienne !== e.nouvelle);
+  const vues = new Set();
+  const chercher = (cle, profondeur) => {
+    if (cle === jusqua) return [];
+    if (profondeur >= ROTATIONS_MAX || vues.has(cle)) return null;
+    vues.add(cle);
+    for (const e of valides) {
+      if (e.ancienne !== cle) continue;
+      if (!verifierSignature(e.ancienne, texteRotation({ domaine, nouvelle: e.nouvelle, date: e.date }), e.signature)) continue;
+      const suite = chercher(e.nouvelle, profondeur + 1);
+      if (suite) return [e, ...suite];
+    }
+    return null;
+  };
+  return chercher(depuis, 0);
+}
