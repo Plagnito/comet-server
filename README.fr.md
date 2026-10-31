@@ -2,10 +2,11 @@
 
 *[English](README.md) · Français*
 
-Comet est une suite de productivité **chiffrée de bout en bout** que vous installez
-sur votre propre serveur : courrier, messagerie d'équipe, conférence, calendrier,
-contacts, tâches, tableau, pipelines, notes et coffre-fort. Vos comptes, vos données et
-vos clés restent chez vous.
+Comet est une suite de productivité que vous installez sur votre propre serveur :
+courrier, messagerie d'équipe, conférence, calendrier, contacts, tâches, tableau,
+pipelines, notes et coffre-fort. Le courrier entre comptes Comet, la messagerie d'équipe
+et le coffre-fort sont **chiffrés de bout en bout** ; les autres outils ne le sont pas
+encore (détails plus bas). Vos comptes, vos données et vos clés restent chez vous.
 
 On l'utilise depuis un navigateur, ou depuis l'application de bureau (Windows, macOS,
 Linux), qui se connecte au serveur de votre choix.
@@ -85,9 +86,17 @@ puis `npm run dist` (installateurs dans `release/`).
 
 ## Ce qui est chiffré, et ce qui ne l'est pas
 
-- Les messages échangés **entre comptes Comet** — du même serveur ou d'un autre serveur
-  Comet (fédération, ci-dessous) — sont chiffrés de bout en bout : les serveurs stockent
-  et transportent du contenu qu'ils ne peuvent pas lire.
+- **Chiffrés de bout en bout :** le courrier **entre comptes Comet** (objet et pièces
+  jointes jusqu'à 50 Mo compris), du même serveur ou d'un autre serveur Comet (fédération,
+  ci-dessous) ; la messagerie d'équipe, messages directs compris ; le coffre-fort. Les
+  serveurs stockent et transportent ce contenu sans pouvoir le lire.
+- **Pas encore chiffrés de bout en bout :** les notes, les contacts, les événements du
+  calendrier, les tâches, le tableau et les pipelines. Ils sont stockés **en clair sur le
+  serveur** : qui l'administre peut les lire. Hébergez votre propre serveur, ou utilisez
+  celui d'un administrateur de confiance.
+- **La visio** passe directement entre les navigateurs des participants (WebRTC, chiffré
+  en transit) ; le serveur ne fait que les mettre en relation. Un relais TURN, si vous en
+  installez un, transmet un flux qu'il ne peut pas déchiffrer.
 - Votre **mot de passe est aussi votre clé de chiffrement**. S'il est perdu, le courrier
   chiffré l'est avec lui : aucun administrateur ne peut le récupérer. C'est le prix d'un
   serveur qui ne peut pas lire ce qu'il garde.
@@ -130,6 +139,7 @@ Détails du protocole : [`server/src/federation/PROTOCOLE.md`](server/src/federa
 - **Entre serveurs Comet** : pas encore de pièces jointes, d'envoi programmé ni de
   messages éphémères (le texte, les réponses et les copies fonctionnent).
 - **Mot de passe oublié** : pas de réinitialisation (voir plus haut).
+- **Chiffrement de bout en bout** des notes, contacts, calendrier, tâches, tableau et pipelines.
 
 ---
 

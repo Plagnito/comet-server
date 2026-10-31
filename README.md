@@ -1,11 +1,12 @@
-# Comet — a self-hosted, end-to-end encrypted productivity suite
+# Comet — a self-hosted productivity suite with end-to-end encrypted mail, chat and vault
 
 *English · [Français](README.fr.md)*
 
 Comet puts mail, team chat, video calls, a calendar, contacts, tasks, boards, pipelines,
-notes and a password vault in one server **you** run. Content is **encrypted end to end**:
-it is encrypted on your device, and the server stores and relays data it cannot read. Your
-accounts, your data and your keys stay with you.
+notes and a password vault in one server **you** run. Mail between Comet accounts, team
+chat and the password vault are **encrypted end to end**: they are encrypted on your device,
+and the server stores and relays data it cannot read. The other tools are not encrypted end
+to end yet (details below). Your accounts, your data and your keys stay with you.
 
 Use it from any browser, or from the desktop app (Windows, macOS, Linux), which connects to
 the server of your choice.
@@ -83,9 +84,16 @@ For now the app is built from this repository: `npm install` at the root, then
 
 ## What is encrypted, and what is not
 
-- Messages **between Comet accounts** — on the same server or on another Comet server
-  (federation, below) — are end-to-end encrypted: servers store and carry content they
-  cannot read.
+- **End-to-end encrypted:** mail **between Comet accounts** (subject and attachments up to
+  50 MB included), on the same server or on another Comet server (federation, below); team
+  chat, including direct messages; the password vault. Servers store and carry this content
+  without being able to read it.
+- **Not end-to-end encrypted yet:** notes, contacts, calendar events, tasks, boards and
+  pipelines. They are stored **in clear text on the server**, so whoever administers it can
+  read them. Run your own server, or use one whose administrator you trust.
+- **Video calls** go directly between participants' browsers (WebRTC, encrypted in transit);
+  the server only puts them in touch. A TURN relay, if you set one up, forwards traffic it
+  cannot decrypt.
 - **Your password is also your encryption key.** If it is lost, your encrypted mail is lost
   with it: no administrator can recover it. That is the price of a server that cannot read
   what it keeps.
@@ -127,6 +135,7 @@ Protocol details (in French): [`server/src/federation/PROTOCOLE.md`](server/src/
   (text, replies and copies work).
 - **Forgotten password**: no reset (see above).
 - **Language**: the interface is in French for now.
+- **End-to-end encryption** of notes, contacts, calendar, tasks, boards and pipelines.
 
 ---
 
