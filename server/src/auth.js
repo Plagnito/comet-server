@@ -10,20 +10,32 @@ export const hashPassword = (pw) => bcrypt.hashSync(pw, 10);
 export const verifyPassword = (pw, hash) => bcrypt.compareSync(pw, hash);
 
 export function signToken(user, sid) {
-  return jwt.sign({ id: user.id, email: user.email, sid }, SECRET, { expiresIn: EXPIRE });
+  return jwt.sign({ id: user.id, email: user.email, sid, av: user.auth_version || 0, purpose: 'session' }, SECRET, { expiresIn: EXPIRE });
 }
 
 // Jeton temporaire émis après le mot de passe quand la 2FA est requise (5 min)
 export function signTmpToken(user) {
-  return jwt.sign({ id: user.id, twofa: 'pending' }, SECRET, { expiresIn: '5m' });
+  return jwt.sign({ id: user.id, twofa: 'pending', av: user.auth_version || 0, purpose: 'twofa' }, SECRET, { expiresIn: '5m' });
 }
 export function verifyTmpToken(token) {
   try {
     const p = jwt.verify(token, SECRET);
-    return p.twofa === 'pending' ? p : null;
+    const user = db.prepare('SELECT auth_version FROM users WHERE id = ?').get(p.id);
+    return p.twofa === 'pending' && (!p.purpose || p.purpose === 'twofa') && user && (p.av || 0) === user.auth_version ? p : null;
   } catch {
     return null;
   }
+}
+
+// Frontière commune HTTP/WS, y compris les sockets déjà ouverts. Les anciens
+// JWT sans version restent valides à version zéro, puis sont révoqués au changement.
+export function userForSession(payload) {
+  if (!payload?.id || payload.twofa || payload.guest || (payload.purpose && payload.purpose !== 'session')
+    || (payload.exp && payload.exp * 1000 <= Date.now())) return null;
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.id);
+  if (!user || (payload.av || 0) !== user.auth_version) return null;
+  if (payload.sid && !db.prepare('SELECT id FROM sessions WHERE id = ? AND user_id = ?').get(payload.sid, user.id)) return null;
+  return user;
 }
 
 // Vue publique d'un utilisateur (jamais le hash ni la clé privée)
@@ -73,8 +85,7 @@ export function authRequired(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentification requise' });
   try {
     const payload = jwt.verify(token, SECRET);
-    if (payload.twofa === 'pending') return res.status(401).json({ error: 'Vérification 2FA requise' });
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.id);
+    const user = userForSession(payload);
     if (!user) return res.status(401).json({ error: 'Session invalide' });
     // Session révocable : si le jeton porte un sid, la session doit exister
     if (payload.sid) {
@@ -84,6 +95,7 @@ export function authRequired(req, res, next) {
       req.sessionId = payload.sid;
     }
     req.user = user;
+    req.authPayload = payload;
     next();
   } catch {
     return res.status(401).json({ error: 'Session expirée ou invalide' });

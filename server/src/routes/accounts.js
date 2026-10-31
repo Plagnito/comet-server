@@ -26,21 +26,23 @@ const router = Router();
 // déterministe ; sinon on la déduit de la requête (pratique en local/localhost).
 const baseUrlFor = (req) => (process.env.COMET_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
 const redirectUriFor = (req, provider) => `${baseUrlFor(req)}/api/accounts/oauth/${provider}/callback`;
-const callbackPage = (title, msg) => `<!doctype html><meta charset="utf-8"><title>${title}</title>
+const callbackPage = (title, msg, nonce) => `<!doctype html><meta charset="utf-8"><title>${title}</title>
 <body style="font-family:system-ui;background:#0b1020;color:#e6e9f5;display:grid;place-items:center;height:100vh;margin:0">
 <div style="text-align:center;max-width:420px;padding:24px">
 <div style="font-size:40px">✦</div><h2>${title}</h2><p style="color:#9aa3c7">${msg}</p>
 <p style="color:#6b7399;font-size:13px">Vous pouvez fermer cette fenêtre.</p></div>
-<script>try{window.opener&&window.opener.postMessage({comet:'oauth-done'},'*')}catch(e){}setTimeout(()=>window.close(),2500)</script>`;
+<script nonce="${nonce}" data-cfasync="false">try{window.opener&&window.opener.postMessage({comet:'oauth-done'},'*')}catch(e){}setTimeout(()=>window.close(),2500)</script>`;
 
 // ── OAuth : RETOUR du fournisseur (navigation navigateur, donc PAS de bearer) ──
 // Défini avant le verrou d'authentification : l'état signé porte l'utilisateur.
 router.get('/oauth/:provider/callback', async (req, res) => {
   const provider = req.params.provider;
   res.set('Content-Type', 'text/html; charset=utf-8');
-  if (req.query.error) return res.status(400).send(callbackPage('Connexion refusée', escapeHtml(req.query.error_description || req.query.error)));
+  res.set('Cache-Control', 'no-store');
+  const nonce = res.locals.scriptNonce;
+  if (req.query.error) return res.status(400).send(callbackPage('Connexion refusée', escapeHtml(req.query.error_description || req.query.error), nonce));
   const st = verifyState(String(req.query.state || ''));
-  if (!st || st.provider !== provider || !isOAuthProvider(provider)) return res.status(400).send(callbackPage('Lien invalide', 'État de connexion expiré ou invalide.'));
+  if (!st || st.provider !== provider || !isOAuthProvider(provider)) return res.status(400).send(callbackPage('Lien invalide', 'État de connexion expiré ou invalide.', nonce));
   try {
     const redirectUri = redirectUriFor(req, provider);
     const tok = await exchangeCode(provider, String(req.query.code || ''), redirectUri);
@@ -59,9 +61,9 @@ router.get('/oauth/:provider/callback', async (req, res) => {
     }
     const acct = db.prepare('SELECT * FROM mail_accounts WHERE user_id = ? AND email = ?').get(st.uid, email);
     firstSync(st.uid, acct); // 1ʳᵉ synchro en arrière-plan + notification client
-    res.send(callbackPage('Compte connecté ✓', `${escapeHtml(email)} est maintenant relié à Comet via ${escapeHtml(p.label)}.`));
+    res.send(callbackPage('Compte connecté ✓', `${escapeHtml(email)} est maintenant relié à Comet via ${escapeHtml(p.label)}.`, nonce));
   } catch (e) {
-    res.status(502).send(callbackPage('Connexion impossible', escapeHtml(e.message || e)));
+    res.status(502).send(callbackPage('Connexion impossible', escapeHtml(e.message || e), nonce));
   }
 });
 

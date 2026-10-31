@@ -31,6 +31,7 @@ export function errorHandler(err, req, res, _next) {
   }
   // Erreur applicative typée : message sûr + code.
   if (err instanceof AppError || err?.expose) {
+    if (Number.isSafeInteger(err.retryAfter) && err.retryAfter > 0) res.set('Retry-After', String(err.retryAfter));
     return res.status(err.status || 400).json({ error: err.message, code: err.code || 'error' });
   }
   // Inconnue : on journalise tout, on ne révèle rien.

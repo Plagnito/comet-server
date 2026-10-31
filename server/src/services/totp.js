@@ -39,6 +39,7 @@ function hotp(secretBytes, counter) {
 }
 
 export function verifyTotp(secretBase32, token, window = 1) {
+  if (typeof secretBase32 !== 'string' || !/^[A-Z2-7]{16,128}={0,6}$/i.test(secretBase32)) return false;
   const t = String(token || '').replace(/\s/g, '');
   if (!/^\d{6}$/.test(t)) return false;
   const secret = base32Decode(secretBase32);

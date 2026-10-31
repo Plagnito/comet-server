@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, getToken } from '../api.js';
+import qrcode from 'qrcode-generator';
 import { useAuth } from '../auth.jsx';
 import { keyFingerprint, generateBoxIdentity, wrapKeyFor, normalizeEmail } from '../crypto.js';
 import { hasPIN, setPIN, removePIN, getTimeoutMin, setTimeoutMin } from '../lock.js';
@@ -27,7 +28,7 @@ function deviceLabel(ua = '') {
 const fmtWhen = (s) => (s ? new Date(s.replace(' ', 'T') + 'Z').toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '');
 
 export default function Settings({ onClose, onAccountsChanged }) {
-  const { user, refreshUser, myPublicKey } = useAuth();
+  const { user, refreshUser, myPublicKey, resetPassword, acceptSession } = useAuth();
   const [pin1, setPin1] = useState('');
   const [pin2, setPin2] = useState('');
   const [pinSet, setPinSet] = useState(hasPIN());
@@ -57,30 +58,25 @@ export default function Settings({ onClose, onAccountsChanged }) {
   const [otpauth, setOtpauth] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
+  const [currentCode, setCurrentCode] = useState('');
+  const [setupToken, setSetupToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordAgain, setNewPasswordAgain] = useState('');
+  const [resetConfirmed, setResetConfirmed] = useState(false);
   const [recovery, setRecovery] = useState([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  // QR code du 2FA : rendu (CDN qrcode-generator) à l'ouverture de l'écran de config,
-  // pour scanner au lieu de recopier la clé. data-cfasync=false évite Rocket Loader.
+  // Bibliothèque incluse dans le build : aucun script tiers sur cet écran secret.
   const qrRef = useRef(null);
   useEffect(() => {
     if (step !== 'setup' || !otpauth) return;
-    let cancelled = false;
-    function draw() {
-      if (cancelled || !qrRef.current || typeof window.qrcode === 'undefined') return;
-      try {
-        const qr = window.qrcode(0, 'M'); qr.addData(otpauth); qr.make();
+    if (!qrRef.current) return;
+    try {
+        const qr = qrcode(0, 'M'); qr.addData(otpauth); qr.make();
         qrRef.current.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2 });
         const sv = qrRef.current.querySelector('svg');
         if (sv) { sv.style.width = '180px'; sv.style.height = '180px'; sv.style.display = 'block'; }
-      } catch { /* QR indisponible : la clé reste affichée */ }
-    }
-    if (typeof window.qrcode === 'undefined') {
-      let s = document.getElementById('qrcode-cdn');
-      if (!s) { s = document.createElement('script'); s.id = 'qrcode-cdn'; s.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js'; s.setAttribute('data-cfasync', 'false'); document.head.appendChild(s); }
-      s.addEventListener('load', draw, { once: true });
-    } else { draw(); }
-    return () => { cancelled = true; };
+    } catch { /* La clé reste disponible manuellement. */ }
   }, [step, otpauth]);
 
   const [aliases, setAliases] = useState([]);
@@ -257,20 +253,41 @@ export default function Settings({ onClose, onAccountsChanged }) {
 
   async function startSetup() {
     setError(''); setBusy(true);
-    try { const r = await api.post('/auth/2fa/setup'); setSecret(r.secret); setOtpauth(r.otpauth); setStep('setup'); }
+    try {
+      const r = await api.post('/auth/2fa/setup', { currentPassword: password, currentCode });
+      acceptSession(r); setSetupToken(r.setupToken); setSecret(r.secret); setOtpauth(r.otpauth);
+      setPassword(''); setCurrentCode(''); setStep('setup');
+    }
     catch (e) { setError(e.message); }
     setBusy(false);
   }
   async function confirmEnable() {
     setError(''); setBusy(true);
-    try { const r = await api.post('/auth/2fa/enable', { code }); setRecovery(r.recoveryCodes); setStep('recovery'); setCode(''); await refreshUser(); }
+    try {
+      const r = await api.post('/auth/2fa/enable', { code, setupToken }); acceptSession(r);
+      setRecovery(r.recoveryCodes); setStep('recovery'); setCode(''); setSetupToken(''); setSecret(''); setOtpauth('');
+    }
     catch (e) { setError(e.message); }
     setBusy(false);
   }
   async function disable() {
     setError(''); setBusy(true);
-    try { await api.post('/auth/2fa/disable', { code, password }); await refreshUser(); setStep('idle'); setCode(''); setPassword(''); }
+    try { const r = await api.post('/auth/2fa/disable', { currentCode: code, currentPassword: password }); acceptSession(r); cancelSecurity(); }
     catch (e) { setError(e.message); }
+    setBusy(false);
+  }
+  function cancelSecurity() {
+    setStep('idle'); setError(''); setCode(''); setPassword(''); setCurrentCode('');
+    setSetupToken(''); setSecret(''); setOtpauth(''); setRecovery([]);
+    setNewPassword(''); setNewPasswordAgain(''); setResetConfirmed(false);
+  }
+  async function replaceIdentity() {
+    setError(''); setBusy(true);
+    try {
+      if (newPassword !== newPasswordAgain || !resetConfirmed) throw new Error('Confirmez le nouveau mot de passe et l’effacement.');
+      await resetPassword(newPassword, { currentPassword: password, currentCode, confirm: resetConfirmed });
+      cancelSecurity(); window.alert('Votre identité de chiffrement a été remplacée et votre courrier personnel effacé. Les anciennes sessions sont révoquées.');
+    } catch (error) { setError(error.message); }
     setBusy(false);
   }
 
@@ -293,8 +310,27 @@ export default function Settings({ onClose, onAccountsChanged }) {
     return (
       <div className="modal-back" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
         <div className="modal" style={{ maxWidth: 520 }}>
-          <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Icon name="shield" size={18} /> Double authentification</h3>
+          <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Icon name="shield" size={18} /> {step === 'reset' ? 'Remplacer l’identité de chiffrement' : 'Double authentification'}</h3>
           {error && <div className="alert" style={{ marginTop: 14 }}>{error}</div>}
+
+          {step === 'reauth' && (<>
+            <p className="setting-desc">Confirmez votre identité avant de préparer l’authentificateur. Le facteur actuel reste actif jusqu’à validation du nouveau.</p>
+            <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe actuel" autoComplete="current-password" />
+            {enabled && <input className="input" value={currentCode} onChange={(e) => setCurrentCode(e.target.value)} placeholder="Code 2FA actuel ou code de récupération" style={{ marginTop: 10 }} />}
+            <div className="modal-foot"><button className="btn ghost" onClick={cancelSecurity}>Annuler</button><button className="btn" disabled={busy || !password || (enabled && !currentCode)} onClick={startSetup}>Continuer</button></div>
+          </>)}
+
+          {step === 'reset' && (<>
+            <p className="setting-desc"><b>Cette opération efface définitivement votre courrier personnel et remplace votre clé.</b> Elle ne sert pas à changer un mot de passe tout en conservant le courrier.</p>
+            <p className="setting-desc">{enabled ? 'Confirmez avec votre facteur actuel ou un code de récupération à usage unique.' : 'Votre mot de passe actuel est requis. Sans lui et sans facteur indépendant déjà configuré, aucune récupération autonome n’est possible.'}</p>
+            {enabled
+              ? <input className="input" value={currentCode} onChange={(e) => setCurrentCode(e.target.value)} placeholder="Code 2FA actuel ou code de récupération" />
+              : <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe actuel" autoComplete="current-password" />}
+            <input className="input" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Nouveau mot de passe" autoComplete="new-password" style={{ marginTop: 10 }} />
+            <input className="input" type="password" value={newPasswordAgain} onChange={(e) => setNewPasswordAgain(e.target.value)} placeholder="Répétez le nouveau mot de passe" autoComplete="new-password" style={{ marginTop: 10 }} />
+            <label style={{ display: 'flex', gap: 8, marginTop: 14 }}><input type="checkbox" checked={resetConfirmed} onChange={(e) => setResetConfirmed(e.target.checked)} /> Je confirme la perte définitive de mon courrier.</label>
+            <div className="modal-foot"><button className="btn ghost" onClick={cancelSecurity}>Annuler</button><button className="btn" style={{ background: 'var(--danger)' }} disabled={busy || !resetConfirmed || !newPassword || newPassword !== newPasswordAgain || (enabled ? !currentCode : !password)} onClick={replaceIdentity}>Effacer et remplacer</button></div>
+          </>)}
 
           {step === 'setup' && (<>
             <p className="setting-desc">1. Scannez ce QR code avec votre application d'authentification, ou ajoutez la clé manuellement (ou le lien <code>otpauth://</code>) :</p>
@@ -304,7 +340,7 @@ export default function Settings({ onClose, onAccountsChanged }) {
             <p className="setting-desc">2. Saisissez le code à 6 chiffres généré :</p>
             <input className="input" value={code} onChange={(e) => setCode(e.target.value)} placeholder="123456" inputMode="numeric" autoFocus />
             <div className="modal-foot">
-              <button className="btn ghost" onClick={() => setStep('idle')}>Annuler</button>
+              <button className="btn ghost" onClick={cancelSecurity}>Annuler</button>
               <button className="btn" disabled={busy || code.length < 6} onClick={confirmEnable}>Confirmer l'activation</button>
             </div>
           </>)}
@@ -312,15 +348,15 @@ export default function Settings({ onClose, onAccountsChanged }) {
           {step === 'recovery' && (<>
             <p className="setting-desc">2FA activée. <b>Conservez ces codes de récupération</b> (usage unique) :</p>
             <div className="recovery-grid">{recovery.map((c) => <code key={c}>{c}</code>)}</div>
-            <div className="modal-foot"><button className="btn" onClick={() => setStep('idle')}>J'ai noté mes codes</button></div>
+            <div className="modal-foot"><button className="btn" onClick={cancelSecurity}>J'ai noté mes codes</button></div>
           </>)}
 
           {step === 'disable' && (<>
-            <p className="setting-desc">Confirmez avec un code 2FA ou votre mot de passe :</p>
+            <p className="setting-desc">Confirmez avec votre mot de passe actuel et un code 2FA (ou de récupération) :</p>
             <input className="input" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Code à 6 chiffres" style={{ marginBottom: 10 }} inputMode="numeric" />
             <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe" />
             <div className="modal-foot">
-              <button className="btn ghost" onClick={() => { setStep('idle'); setError(''); }}>Annuler</button>
+              <button className="btn ghost" onClick={cancelSecurity}>Annuler</button>
               <button className="btn" style={{ background: 'var(--danger)' }} disabled={busy} onClick={disable}>Désactiver la 2FA</button>
             </div>
           </>)}
@@ -354,7 +390,15 @@ export default function Settings({ onClose, onAccountsChanged }) {
           <span className={`badge ${enabled ? 'on' : ''}`}>{enabled ? 'Activée' : 'Désactivée'}</span>
           {enabled
             ? <button className="btn ghost" style={{ marginLeft: 10 }} onClick={() => setStep('disable')}>Désactiver</button>
-            : <button className="btn" style={{ marginLeft: 10 }} disabled={busy} onClick={startSetup}>Activer</button>}
+            : <button className="btn" style={{ marginLeft: 10 }} disabled={busy} onClick={() => setStep('reauth')}>Activer</button>}
+        </div>
+
+        {/* Verrou de l'application */}
+        <div className="ss-section ss-securite" style={{ marginTop: 20 }}>
+          <div className="setting-title">Clé de chiffrement et connexion</div>
+          <p className="setting-desc">Le jeton et la clé déverrouillée restent uniquement dans cette fenêtre. Recharger ou fermer demande une reconnexion.</p>
+          {enabled && <button className="btn ghost" onClick={() => { cancelSecurity(); setStep('reauth'); }}>Remplacer l’authentificateur</button>}
+          <button className="btn ghost" style={{ marginLeft: enabled ? 10 : 0 }} onClick={() => { cancelSecurity(); setStep('reset'); }}>Remplacer la clé et effacer mon courrier…</button>
         </div>
 
         {/* Verrou de l'application */}

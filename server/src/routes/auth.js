@@ -5,9 +5,16 @@ import { assertStrongPassword } from '../util/password.js';
 import { validateBody, registerSchema, loginSchema } from '../util/validate.js';
 import { deliverMessage } from '../services/mail.js';
 import { generateSecret, verifyTotp, otpauthUri, generateRecoveryCodes } from '../services/totp.js';
-import { INSCRIPTION_OUVERTE } from '../config.js';
+import { INSCRIPTION_OUVERTE, BOOTSTRAP_TOKEN } from '../config.js';
+import { matchesBootstrapToken } from '../util/bootstrap.js';
+import { securityChange, consumeRecoveryCode, enrollmentToken } from '../services/reauth.js';
+import { AppError } from '../util/errors.js';
+import { assertProofAllowed, failedProof, clearProofFailures } from '../services/auth-attempts.js';
 
 const router = Router();
+// Migration : conserver les administrateurs déjà présents sans rouvrir le setup.
+db.prepare("INSERT OR IGNORE INTO settings (k, v) SELECT 'bootstrap_complete', '1' WHERE EXISTS (SELECT 1 FROM users WHERE is_admin = 1)").run();
+const bootstrapComplete = () => db.prepare("SELECT v FROM settings WHERE k = 'bootstrap_complete'").get()?.v === '1';
 
 const COLORS = ['#4f46e5', '#db2777', '#0d9488', '#ea580c', '#7c3aed', '#2563eb', '#c026d3', '#16a34a'];
 const pickColor = () => COLORS[Math.floor(Math.random() * COLORS.length)];
@@ -23,7 +30,7 @@ function normalizeEmail(raw) {
 // Réponse d'authentification : crée une session, puis renvoie jeton + profil + clé privée enveloppée
 function authPayload(user, req, res) {
   const ua = String(req.headers['user-agent'] || '').slice(0, 300);
-  const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+  const ip = req.ip || req.socket?.remoteAddress || '';
   const sid = db.prepare('INSERT INTO sessions (user_id, user_agent, ip) VALUES (?, ?, ?)').run(user.id, ua, ip).lastInsertRowid;
   return {
     token: signToken(user, sid),
@@ -34,13 +41,18 @@ function authPayload(user, req, res) {
 
 // Ce que la page de connexion doit proposer, AVANT toute session.
 router.get('/options', (req, res) => {
-  res.json({ inscription: INSCRIPTION_OUVERTE });
+  const bootstrapRequired = !bootstrapComplete();
+  res.json({ inscription: INSCRIPTION_OUVERTE || bootstrapRequired, bootstrapRequired });
 });
 
-const inscriptionFermee = (req, res, next) => (INSCRIPTION_OUVERTE ? next()
+const inscriptionFermee = (req, res, next) => (INSCRIPTION_OUVERTE || !bootstrapComplete() ? next()
   : res.status(403).json({ error: 'Les inscriptions sont fermées sur ce serveur.', code: 'inscription_fermee' }));
 
 router.post('/register', inscriptionFermee, validateBody(registerSchema), (req, res) => {
+  const authorizedSetup = matchesBootstrapToken(req.body.bootstrapToken, BOOTSTRAP_TOKEN);
+  if (!bootstrapComplete() && !authorizedSetup) {
+    return res.status(403).json({ error: "Code d'installation requis pour créer le premier administrateur.", code: 'bootstrap_required' });
+  }
   const email = normalizeEmail(req.body.email);
   const displayName = String(req.body.displayName || '').trim();
   const password = String(req.body.password || '');
@@ -57,14 +69,23 @@ router.post('/register', inscriptionFermee, validateBody(registerSchema), (req, 
     return res.status(409).json({ error: 'Cette adresse est déjà utilisée' });
   }
 
-  const info = db
-    .prepare('INSERT INTO users (email, display_name, password_hash, avatar_color, public_key, enc_private_key, listed) VALUES (?, ?, ?, ?, ?, ?, 0)')
-    .run(email, displayName, hashPassword(password), pickColor(), publicKey, encPrivateKey);
-  // Serveur neuf : le premier compte créé alors qu'aucun administrateur n'existe le
-  // devient. Sans cette règle, un serveur auto-hébergé n'aurait personne pour le gérer
-  // avant un redémarrage avec COMET_ADMIN_EMAIL.
-  if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {
-    db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(info.lastInsertRowid);
+  const passwordHash = hashPassword(password);
+  let info;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const first = !bootstrapComplete();
+    if ((first && !authorizedSetup) || (!first && !INSCRIPTION_OUVERTE)) {
+      db.exec('ROLLBACK');
+      return res.status(403).json({ error: 'Création de compte non autorisée' });
+    }
+    info = db.prepare('INSERT INTO users (email, display_name, password_hash, avatar_color, public_key, enc_private_key, listed, is_admin) VALUES (?, ?, ?, ?, ?, ?, 0, ?)')
+      .run(email, displayName, passwordHash, pickColor(), publicKey, encPrivateKey, first ? 1 : 0);
+    if (first) db.prepare("INSERT INTO settings (k, v) VALUES ('bootstrap_complete', '1') ON CONFLICT(k) DO UPDATE SET v = '1'").run();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    if (error.errcode === 2067 || error.code?.startsWith('ERR_SQLITE_CONSTRAINT')) return res.status(409).json({ error: 'Cette adresse est déjà utilisée' });
+    throw error;
   }
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
 
@@ -116,44 +137,52 @@ router.post('/login', validateBody(loginSchema), (req, res) => {
 
 // Seconde étape : vérification du code 2FA (ou code de récupération)
 router.post('/2fa/verify', (req, res) => {
-  const payload = verifyTmpToken(req.body.tmpToken);
-  if (!payload) return res.status(401).json({ error: 'Session de connexion expirée' });
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.id);
-  if (!user || !user.totp_enabled) return res.status(401).json({ error: 'Session invalide' });
-
-  const code = String(req.body.code || '').trim();
-  if (verifyTotp(user.totp_secret, code)) return res.json(authPayload(user, req, res));
-
-  // Tentative par code de récupération (à usage unique)
-  const codes = JSON.parse(user.recovery_codes || '[]');
-  const idx = codes.findIndex((h) => verifyPassword(code.toUpperCase(), h));
-  if (idx !== -1) {
-    codes.splice(idx, 1);
-    db.prepare('UPDATE users SET recovery_codes = ? WHERE id = ?').run(JSON.stringify(codes), user.id);
-    return res.json(authPayload(user, req, res));
+  let proofUser;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const payload = verifyTmpToken(req.body.tmpToken);
+    if (!payload) throw new AppError('Session de connexion expirée', { status: 401 });
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.id);
+    if (!user || !user.totp_enabled) throw new AppError('Session invalide', { status: 401 });
+    proofUser = user.id;
+    assertProofAllowed(user.id, 'login');
+    const code = String(req.body.code || '').trim();
+    if (!(user.totp_secret && verifyTotp(user.totp_secret, code)) && !consumeRecoveryCode(user, code)) {
+      throw new AppError('Code incorrect', { status: 401, code: 'mfa_incorrect' });
+    }
+    const response = authPayload(user, req, res);
+    clearProofFailures(user.id, 'login');
+    db.exec('COMMIT');
+    return res.json(response);
+  } catch (error) {
+    if (proofUser && error.code === 'mfa_incorrect') { failedProof(proofUser, 'login'); db.exec('COMMIT'); }
+    else db.exec('ROLLBACK');
+    throw error;
   }
-  res.status(401).json({ error: 'Code incorrect' });
 });
 
 router.get('/me', authRequired, (req, res) => {
   res.json({ user: publicUser(req.user), encPrivateKey: req.user.enc_private_key || null });
 });
 
-// Définit un mot de passe Comet. Pour un compte sans mot de passe choisi (password_set=0) on
-// N'EXIGE PAS l'ancien (l'utilisateur ne le connaît pas) ; sinon on le vérifie. Une
-// fois posé, l'utilisateur peut aussi se connecter par e-mail/mot de passe, et le
-// front provisionne ses clés E2EE (wrap avec ce mot de passe).
+// Change le mot de passe avec preuve fraîche et re-scellement de la clé existante.
+// Les comptes sans mot de passe choisi nécessitent un mécanisme d'enrôlement
+// indépendant ; une session bearer seule ne peut pas en définir un.
 router.post('/set-password', authRequired, (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  const newPassword = String(req.body.newPassword || '');
-  if (user.password_set) {
-    if (!verifyPassword(String(req.body.oldPassword || ''), user.password_hash)) {
-      return res.status(400).json({ error: 'Mot de passe actuel incorrect' });
+  const newPassword = req.body.newPassword;
+  if (typeof newPassword !== 'string' || newPassword.length > 200) throw new AppError('Nouveau mot de passe invalide');
+  assertStrongPassword(newPassword, [req.user.email, req.user.display_name]);
+  req.body.currentPassword ??= req.body.oldPassword;
+  const result = securityChange(req, (user) => {
+    db.prepare('UPDATE users SET password_hash = ?, password_set = 1, enc_private_key = ? WHERE id = ?')
+      .run(hashPassword(newPassword), req.body.encPrivateKey || user.enc_private_key, user.id);
+    return { ok: true };
+  }, { validate(user) {
+    if (user.public_key && (typeof req.body.encPrivateKey !== 'string' || !req.body.encPrivateKey || req.body.encPrivateKey.length > 64000)) {
+      throw new AppError('Clé privée re-scellée avec le nouveau mot de passe requise.', { code: 'keys_required' });
     }
-  }
-  assertStrongPassword(newPassword, [user.email, user.display_name]);
-  db.prepare('UPDATE users SET password_hash = ?, password_set = 1 WHERE id = ?').run(hashPassword(newPassword), user.id);
-  res.json({ ok: true, user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) });
+  } });
+  res.json({ ...result.data, ...authPayload(result.user, req, res) });
 });
 
 // Réinitialisation DESTRUCTIVE du mot de passe Comet (E2EE). À utiliser quand
@@ -173,72 +202,79 @@ router.post('/reset-password', authRequired, (req, res) => {
   if (req.body?.confirm !== true) {
     return res.status(400).json({ error: 'Confirmation explicite requise (opération destructive).', code: 'confirm_required' });
   }
-  if (!publicKey || !encPrivateKey) {
+  if (typeof publicKey !== 'string' || !publicKey || publicKey.length > 8000
+    || typeof encPrivateKey !== 'string' || !encPrivateKey || encPrivateKey.length > 64000) {
     return res.status(400).json({ error: 'Nouvelle clé de chiffrement manquante.', code: 'keys_missing' });
   }
-  assertStrongPassword(String(newPassword || ''), [req.user.email, req.user.display_name]);
+  if (typeof newPassword !== 'string' || newPassword.length > 200) throw new AppError('Nouveau mot de passe invalide');
+  assertStrongPassword(newPassword, [req.user.email, req.user.display_name]);
 
-  const uid = req.user.id;
-  let purged = 0;
-  db.exec('BEGIN');
-  try {
+  const result = securityChange(req, (user) => {
+    const uid = user.id;
     // Purge la boîte de CET utilisateur : ses copies (inbox/envoyés/brouillons/archive/
     // corbeille), ses clés de message enveloppées (inutilisables sans l'ancienne clé),
     // ses lignes destinataire et ses pièces jointes hors-ligne. On NE supprime PAS les
     // lignes `messages` (partagées) → les autres destinataires gardent leur copie.
-    purged = db.prepare('DELETE FROM mail_items WHERE user_id = ?').run(uid).changes;
+    const purged = db.prepare('DELETE FROM mail_items WHERE user_id = ?').run(uid).changes;
     db.prepare('DELETE FROM message_keys WHERE user_id = ?').run(uid);
     db.prepare('DELETE FROM recipients WHERE user_id = ?').run(uid);
     db.prepare('DELETE FROM attachments WHERE recipient_id = ?').run(uid);
     // Nouvelle identité de chiffrement + nouveau mot de passe (déjà scellé côté client).
     db.prepare('UPDATE users SET password_hash = ?, password_set = 1, public_key = ?, enc_private_key = ? WHERE id = ?')
       .run(hashPassword(String(newPassword)), publicKey, encPrivateKey, uid);
-    db.exec('COMMIT');
-  } catch (e) {
-    db.exec('ROLLBACK');
-    console.error('[reset-password] échec pour #' + uid + ':', e);
-    return res.status(500).json({ error: 'Réinitialisation impossible.', code: 'reset_failed' });
-  }
+    return { ok: true, purged };
+  }, { proof: 'recovery-reset' });
   // Journalisation (jamais silencieux) : une réinitialisation détruit du courrier.
-  console.warn(`[reset-password] user #${uid} <${req.user.email}> a réinitialisé son mot de passe Comet — boîte purgée (${purged} éléments), clé E2EE régénérée.`);
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(uid);
-  res.json({ ok: true, purged, user: publicUser(u) });
+  console.warn(`[reset-password] user #${result.user.id}: boîte purgée (${result.data.purged} éléments), identité remplacée.`);
+  res.json({ ...result.data, ...authPayload(result.user, req, res) });
 });
 
 // ── Configuration 2FA ───────────────────────────────────────────────────────
 router.post('/2fa/setup', authRequired, (req, res) => {
-  const secret = generateSecret();
-  db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').run(secret, req.user.id);
-  res.json({ secret, otpauth: otpauthUri(secret, req.user.email) });
+  const result = securityChange(req, (user) => {
+    const secret = generateSecret();
+    db.prepare('UPDATE users SET pending_totp_secret = ?, pending_totp_until = ? WHERE id = ?').run(secret, Date.now() + 600_000, user.id);
+    return { secret, otpauth: otpauthUri(secret, user.email) };
+  });
+  res.json({ ...result.data, ...authPayload(result.user, req, res), setupToken: enrollmentToken(result.user) });
 });
 
 router.post('/2fa/enable', authRequired, (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  if (!user.totp_secret) return res.status(400).json({ error: 'Lancez d\'abord la configuration' });
-  if (!verifyTotp(user.totp_secret, req.body.code)) return res.status(400).json({ error: 'Code incorrect' });
-
-  const recovery = generateRecoveryCodes();
-  const hashed = JSON.stringify(recovery.map((c) => hashPassword(c)));
-  db.prepare('UPDATE users SET totp_enabled = 1, recovery_codes = ? WHERE id = ?').run(hashed, user.id);
-  res.json({ ok: true, recoveryCodes: recovery });
+  const result = securityChange(req, (user) => {
+    const recovery = generateRecoveryCodes();
+    db.prepare('UPDATE users SET totp_secret = pending_totp_secret, totp_enabled = 1, pending_totp_secret = NULL, pending_totp_until = NULL, recovery_codes = ? WHERE id = ?')
+      .run(JSON.stringify(recovery.map((code) => hashPassword(code))), user.id);
+    return { ok: true, recoveryCodes: recovery };
+  }, { proof: 'enrollment' });
+  res.json({ ...result.data, ...authPayload(result.user, req, res) });
 });
 
 router.post('/2fa/disable', authRequired, (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  const code = String(req.body.code || '').trim();
-  const okCode = user.totp_enabled && verifyTotp(user.totp_secret, code);
-  const okPw = verifyPassword(String(req.body.password || ''), user.password_hash);
-  if (!okCode && !okPw) return res.status(400).json({ error: 'Code ou mot de passe requis' });
-  db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL, recovery_codes = NULL WHERE id = ?').run(user.id);
-  res.json({ ok: true });
+  req.body.currentPassword ??= req.body.password;
+  req.body.currentCode ??= req.body.code;
+  const result = securityChange(req, (user) => {
+    db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL, pending_totp_secret = NULL, pending_totp_until = NULL, recovery_codes = NULL WHERE id = ?').run(user.id);
+    return { ok: true };
+  });
+  res.json({ ...result.data, ...authPayload(result.user, req, res) });
 });
 
 // Provisionnement paresseux des clés E2EE (comptes de démo / existants sans clés)
 router.post('/keys', authRequired, (req, res) => {
   const { publicKey, encPrivateKey } = req.body;
-  if (!publicKey || !encPrivateKey) return res.status(400).json({ error: 'Clés manquantes' });
-  if (req.user.public_key) return res.status(409).json({ error: 'Clés déjà définies' });
-  db.prepare('UPDATE users SET public_key = ?, enc_private_key = ? WHERE id = ?').run(publicKey, encPrivateKey, req.user.id);
+  if (typeof publicKey !== 'string' || !publicKey || publicKey.length > 8000
+    || typeof encPrivateKey !== 'string' || !encPrivateKey || encPrivateKey.length > 64000) return res.status(400).json({ error: 'Clés manquantes' });
+  const result = securityChange(req, (user) => {
+    db.prepare('UPDATE users SET public_key = ?, enc_private_key = ? WHERE id = ?').run(publicKey, encPrivateKey, user.id);
+    return { ok: true };
+  }, { proof: 'initial-keys', validate(user) {
+    if (user.public_key) throw new AppError('Clés déjà définies', { status: 409, code: 'keys_exist' });
+  } });
+  res.json({ ...result.data, ...authPayload(result.user, req, res) });
+});
+
+router.post('/logout', authRequired, (req, res) => {
+  if (req.sessionId) db.prepare('DELETE FROM sessions WHERE id = ? AND user_id = ?').run(req.sessionId, req.user.id);
   res.json({ ok: true });
 });
 

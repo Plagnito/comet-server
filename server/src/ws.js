@@ -7,8 +7,17 @@ import {
 } from './services/confrooms.js';
 import { JWT_SECRET as SECRET } from './config.js';
 import { db } from './db.js';
+import { userForSession } from './auth.js';
 
 const clients = new Map(); // userId -> Set<ws>
+const liveSession = (ws) => {
+  if (ws.readyState !== ws.OPEN) return false;
+  if ((ws.authPayload?.exp && ws.authPayload.exp * 1000 <= Date.now())
+    || (!ws.isGuest && !userForSession(ws.authPayload))) {
+    ws.close(4001, 'auth'); return false;
+  }
+  return true;
+};
 
 // ── Salons de conférence (signaling P2P en mémoire, éphémère) ────────────────
 // room -> Map(peerId -> ws). Le serveur ne relaie que SDP/ICE ; les flux audio/
@@ -21,7 +30,7 @@ function confBroadcast(roomId, obj, exceptPeerId) {
   const r = confSockets.get(roomId);
   if (!r) return;
   const data = JSON.stringify(obj);
-  for (const [pid, sock] of r) { if (pid !== exceptPeerId && sock.readyState === sock.OPEN) sock.send(data); }
+  for (const [pid, sock] of r) { if (pid !== exceptPeerId && liveSession(sock)) sock.send(data); }
 }
 
 function confJoin(ws, roomId, name) {
@@ -38,7 +47,7 @@ function confJoin(ws, roomId, name) {
   if (!confSockets.has(roomId)) confSockets.set(roomId, new Map());
   const sockets = confSockets.get(roomId);
   const peers = [...sockets.entries()]
-    .filter(([pid]) => pid !== ws.peerId)
+    .filter(([pid, sock]) => pid !== ws.peerId && liveSession(sock))
     .map(([pid, s]) => ({ peerId: pid, name: s.confName, host: !s.isGuest && s.userId === room.hostId }));
   sockets.set(ws.peerId, ws);
   addParticipant(room, ws.peerId, { name: ws.confName, guest: !!ws.isGuest, userId: ws.userId || null, host: isHost });
@@ -61,7 +70,7 @@ function confLeave(ws, roomId) {
 
 function confSignal(ws, roomId, to, data) {
   const target = confSockets.get(roomId)?.get(to);
-  if (target && target.readyState === target.OPEN) target.send(JSON.stringify({ type: 'conf:signal', room: roomId, from: ws.peerId, data }));
+  if (target && liveSession(target)) target.send(JSON.stringify({ type: 'conf:signal', room: roomId, from: ws.peerId, data }));
 }
 
 // Exclure un participant (hôte uniquement).
@@ -95,18 +104,18 @@ function remove(userId, ws) {
   return false;
 }
 
-export const isOnline = (userId) => clients.has(userId);
-export const onlineUserIds = () => [...clients.keys()];
+export const isOnline = (userId) => [...(clients.get(userId) || [])].some(liveSession);
+export const onlineUserIds = () => [...clients.keys()].filter(isOnline);
 
 // Types d'événements qui méritent une NOTIFICATION BUREAU quand Comet est fermé.
 const PUSHABLE = new Set(['mail:new', 'mail:ext']);
 
 export function notifyUser(userId, obj) {
   const set = clients.get(userId);
-  const live = set && [...set].some((ws) => ws.readyState === ws.OPEN);
+  const live = set && [...set].some(liveSession);
   if (live) {
     const data = JSON.stringify(obj);
-    for (const ws of set) { if (ws.readyState === ws.OPEN) ws.send(data); }
+    for (const ws of set) { if (liveSession(ws)) ws.send(data); }
     return;
   }
   // 🔴 AUCUN socket ouvert : l'utilisateur n'a pas Comet devant lui. C'est le seul
@@ -122,7 +131,7 @@ function broadcast(obj, exceptUserId) {
   const data = JSON.stringify(obj);
   for (const [uid, set] of clients) {
     if (uid === exceptUserId) continue;
-    for (const ws of set) { if (ws.readyState === ws.OPEN) ws.send(data); }
+    for (const ws of set) { if (liveSession(ws)) ws.send(data); }
   }
 }
 
@@ -134,13 +143,14 @@ export function attachWebSocket(server) {
     try {
       const token = new URL(req.url, 'http://x').searchParams.get('token');
       const payload = jwt.verify(token, SECRET);
+      ws.authPayload = payload;
       if (payload.guest) {
         // Jeton invité : conférence uniquement (pas de présence ni de courrier).
         ws.isGuest = true;
         ws.guestRoom = String(payload.room || '');
         ws.guestName = String(payload.name || 'Invité');
       } else {
-        if (payload.twofa === 'pending' || !payload.id) throw new Error('invalid');
+        if (!userForSession(payload)) throw new Error('invalid');
         // Session révocable : un jeton dont la session a été révoquée ne doit plus ouvrir le WS.
         // Avant, jwt.verify suffisait → une session « révoquée » gardait le temps réel jusqu'à
         // l'expiration du JWT (~30 j). Même garde que authRequired (auth.js).
@@ -157,6 +167,7 @@ export function attachWebSocket(server) {
       ws.isAlive = true;
       ws.on('pong', () => { ws.isAlive = true; });
       ws.on('message', (raw) => {
+        if (!liveSession(ws)) return;
         let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
         if (msg.type === 'conf:join') confJoin(ws, ws.guestRoom, msg.name); // un invité ne rejoint que SON salon
         else if (msg.type === 'conf:leave') confLeave(ws, ws.guestRoom);
@@ -175,6 +186,7 @@ export function attachWebSocket(server) {
     if (wasOffline) broadcast({ type: 'presence', userId, online: true }, userId);
 
     ws.on('message', (raw) => {
+      if (!liveSession(ws)) return;
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
       if (msg.type === 'rtc:signal' && msg.to) {
@@ -201,6 +213,7 @@ export function attachWebSocket(server) {
 
   const heartbeat = setInterval(() => {
     for (const client of wss.clients) {
+      if (!liveSession(client)) continue;
       if (client.isAlive === false) { client.terminate(); continue; }
       client.isAlive = false;
       try { client.ping(); } catch {}
