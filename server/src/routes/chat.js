@@ -127,7 +127,14 @@ router.post('/dm', (req, res) => {
 
   const members = req.body.members || {}; // { email: encKey } pour les 2 membres
   const entries = Object.entries(members).map(([email, encKey]) => ({ id: emailToId(email), encKey })).filter((x) => x.id && x.encKey);
-  if (entries.length < 2) return res.status(400).json({ error: 'Clés des deux membres requises' });
+  // Exactement deux enveloppes, l'une pour l'expéditeur, l'autre pour le destinataire.
+  // Le serveur ne lit pas la clé du canal : c'est à lui de refuser un troisième
+  // lecteur, que l'autre personne ne verrait jamais.
+  const paire = new Set([req.user.id, otherId]);
+  const ids = new Set(entries.map((e) => e.id));
+  if (Object.keys(members).length !== 2 || entries.length !== 2 || ids.size !== 2 || ![...ids].every((id) => paire.has(id))) {
+    return res.status(400).json({ error: 'Un message direct réunit exactement deux personnes : vous et votre destinataire' });
+  }
 
   const info = db.prepare('INSERT INTO channels (name, description, created_by, is_dm, dm_pair) VALUES (?, ?, ?, 1, ?)')
     .run(String(req.body.name || 'Message direct').slice(0, 80), '', req.user.id, pair);
@@ -184,8 +191,9 @@ router.post('/channels/:id/messages', (req, res) => {
 // ── Ajouter des membres (l'ajouteur fournit la clé enveloppée pour eux) ──────
 router.post('/channels/:id/members', (req, res) => {
   if (!isMember(req.params.id, req.user.id)) return res.status(403).json({ error: 'Non membre' });
-  const chan = db.prepare('SELECT id, org_id, kind FROM channels WHERE id = ?').get(req.params.id);
+  const chan = db.prepare('SELECT id, org_id, kind, is_dm FROM channels WHERE id = ?').get(req.params.id);
   if (!chan) return res.status(404).json({ error: 'Canal introuvable' });
+  if (chan.is_dm) return res.status(403).json({ error: 'Un message direct ne peut pas accueillir d’autres membres' });
   // « Général » : réservé aux membres de l'organisation (c'est le canal de l'équipe).
   // INSERT OR IGNORE → un membre déjà présent garde SA clé : le rattrapage effectué
   // par plusieurs collègues en même temps reste sans effet de bord.
@@ -202,5 +210,20 @@ router.post('/channels/:id/members', (req, res) => {
   }
   res.json({ added });
 });
+
+// Un message direct enregistré avant cette règle a pu recevoir un troisième membre.
+// On retire tout membre qui n'appartient pas à la paire du canal (dm_pair « a-b »).
+export function purgerIntrusMessagesDirects() {
+  const retirer = db.prepare('DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?');
+  let retires = 0;
+  for (const dm of db.prepare('SELECT id, dm_pair FROM channels WHERE is_dm = 1 AND dm_pair IS NOT NULL').all()) {
+    const paire = new Set(String(dm.dm_pair).split('-').map(Number).filter(Number.isInteger));
+    if (paire.size !== 2) continue;
+    for (const uid of memberIds(dm.id)) if (!paire.has(uid)) retires += retirer.run(dm.id, uid).changes;
+  }
+  if (retires) console.warn(`[chat] ${retires} membre(s) retiré(s) de messages directs qui n'étaient pas les leurs.`);
+  return retires;
+}
+purgerIntrusMessagesDirects();
 
 export default router;

@@ -1,4 +1,5 @@
 import { ImapFlow } from 'imapflow';
+import { destinationMail } from './mail-destination.js';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { db } from '../db.js';
@@ -39,10 +40,12 @@ async function smtpAuth(account) {
 
 // Vérifie que les identifiants fonctionnent (IMAP + SMTP) avant d'enregistrer le compte.
 export async function testConnection(cfg) {
-  const imap = new ImapFlow({ host: cfg.imapHost, port: Number(cfg.imapPort), secure: imapSecure(cfg.imapPort), auth: { user: cfg.username, pass: cfg.password }, logger: false });
+  const di = await destinationMail(cfg.imapHost, cfg.imapPort, 'imap');
+  const ds = await destinationMail(cfg.smtpHost, cfg.smtpPort, 'smtp');
+  const imap = new ImapFlow({ ...di, port: Number(cfg.imapPort), secure: imapSecure(cfg.imapPort), auth: { user: cfg.username, pass: cfg.password }, logger: false });
   await imap.connect();
   await imap.logout();
-  const t = nodemailer.createTransport({ host: cfg.smtpHost, port: Number(cfg.smtpPort), secure: smtpSecure(cfg.smtpPort), auth: { user: cfg.username, pass: cfg.password } });
+  const t = nodemailer.createTransport({ ...ds, port: Number(cfg.smtpPort), secure: smtpSecure(cfg.smtpPort), auth: { user: cfg.username, pass: cfg.password } });
   await t.verify();
   return true;
 }
@@ -84,7 +87,7 @@ export async function fetchNewMessages(account, client) {
 // Synchro one-shot : ouvre une connexion, récupère les nouveaux messages, ferme.
 // Utilisée par le bouton « Synchroniser » et comme REPLI du mode push (IDLE).
 export async function syncAccount(account) {
-  const client = new ImapFlow({ host: account.imap_host, port: account.imap_port, secure: imapSecure(account.imap_port), auth: await imapAuth(account), logger: false });
+  const client = new ImapFlow({ ...(await destinationMail(account.imap_host, account.imap_port, 'imap')), port: account.imap_port, secure: imapSecure(account.imap_port), auth: await imapAuth(account), logger: false });
   try {
     await client.connect();
     const lock = await client.getMailboxLock('INBOX');
@@ -125,7 +128,7 @@ async function getTransport(account) {
   if (cached && cached.key === key) return cached.t;
   if (cached) { try { cached.t.close(); } catch { /* déjà fermé */ } }
   const t = nodemailer.createTransport({
-    host: account.smtp_host, port: Number(account.smtp_port), secure: smtpSecure(account.smtp_port),
+    ...(await destinationMail(account.smtp_host, account.smtp_port, 'smtp')), port: Number(account.smtp_port), secure: smtpSecure(account.smtp_port),
     requireTLS: !smtpSecure(account.smtp_port), // STARTTLS sur 587 (Outlook)
     pool: true, maxConnections: 2, maxMessages: 50,
     auth,
@@ -192,7 +195,7 @@ async function openIdle(account) {
   if (st.closing || st.client) return;
   let client;
   try {
-    client = new ImapFlow({ host: account.imap_host, port: account.imap_port, secure: imapSecure(account.imap_port), auth: await imapAuth(account), logger: false, emitLogs: false });
+    client = new ImapFlow({ ...(await destinationMail(account.imap_host, account.imap_port, 'imap')), port: account.imap_port, secure: imapSecure(account.imap_port), auth: await imapAuth(account), logger: false, emitLogs: false });
     client.on('error', () => { /* 'close' enchaîne la reconnexion */ });
     client.on('close', () => { const s = idle.get(id); if (!s || s.closing) return; s.client = null; scheduleReconnect(id, account); });
     client.on('exists', () => { drain(id); });

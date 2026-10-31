@@ -14,29 +14,15 @@ import https from 'node:https';
 import dns from 'node:dns';
 import net from 'node:net';
 import { LIMITES } from './config.js';
+import { estAdressePrivee } from '../util/adresses.js';
 
 export class ErreurReseau extends Error {
   constructor(message, code = 'reseau') { super(message); this.code = code; }
 }
 
-function v4EnEntier(ip) { return ip.split('.').reduce((n, o) => ((n << 8) + Number(o)) >>> 0, 0); }
-const dansPlage = (ip, base, bits) => ((v4EnEntier(ip) ^ v4EnEntier(base)) >>> (32 - bits)) === 0;
-
-export function estAdressePrivee(ip) {
-  const fam = net.isIP(ip);
-  if (fam === 4) {
-    return [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
-      ['172.16.0.0', 12], ['192.168.0.0', 16]].some(([b, n]) => dansPlage(ip, b, n));
-  }
-  if (fam === 6) {
-    const a = ip.toLowerCase();
-    if (a === '::1' || a === '::') return true;
-    const v4 = a.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (v4) return estAdressePrivee(v4[1]);
-    return /^f[cd]/.test(a) || /^fe[89ab]/.test(a); // fc00::/7 (ULA), fe80::/10 (lien local)
-  }
-  return false;
-}
+// Classement commun à la fédération et aux comptes mail (toutes les écritures IPv6
+// d'une adresse IPv4 comprises : ::ffff:7f00:1 est bien la boucle locale).
+export { estAdressePrivee };
 
 // Décide si l'adresse IP est admissible pour ce protocole.
 function admissible(ip, protocole, autoriserPrive) {
