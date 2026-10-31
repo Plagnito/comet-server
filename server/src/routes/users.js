@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db.js';
 import { authRequired, publicUser } from '../auth.js';
 import { isOnline } from '../ws.js';
+import { voit, ontEchange } from '../services/visibilite.js';
 import { versAdresseInterne, decouper, estDomaineDistant } from '../federation/config.js';
 import { resoudreDistants } from '../federation/service.js';
 
@@ -103,7 +104,11 @@ router.get('/recipients', authRequired, async (req, res, next) => {
   }
   res.json({
     recipients: [
-      ...[...recipients].map(([email, v]) => ({ email, publicKey: v.pk, online: isOnline(v.id) })),
+      // « En ligne » décide entre l'envoi des pièces jointes en pair-à-pair et le relais
+      // chiffré du serveur. Il n'est vrai que pour un compte dont on voit la présence ou
+      // avec qui l'on a déjà échangé : sinon, taper une adresse suffirait à savoir si la
+      // personne est connectée. À défaut, la pièce jointe passe par le relais.
+      ...[...recipients].map(([email, v]) => ({ email, publicKey: v.pk, online: isOnline(v.id) && (voit(req.user.id, v.id) || ontEchange(req.user.id, v.id)) })),
       ...fed.trouves,
     ],
     unknown: [...unknown, ...fed.inconnus],

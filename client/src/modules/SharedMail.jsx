@@ -3,7 +3,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { Avatar } from '../components/shell-meta.jsx';
 import Icon from '../components/Icon.jsx';
-import { unwrapKey, unwrapPrivateKeyAES, decryptMessage, encryptMessage, normalizeEmail } from '../crypto.js';
+import { unwrapKey, unwrapPrivateKeyAES, decryptMessageAvecCles, encryptMessage, normalizeEmail, preparerRotationBoite } from '../crypto.js';
 
 const fmtDate = (s) => {
   if (!s) return '';
@@ -41,27 +41,55 @@ export default function SharedMail({ box, reloadKey, onChanged }) {
   const [routes, setRoutes] = useState([]);
   const [routeForm, setRouteForm] = useState({ matchFrom: '', assignee: '' });
   const boxPrivRef = useRef(null);            // CryptoKey privée de la boîte (en session)
+  const boxOldRef = useRef([]);               // anciennes clés privées (courrier d'avant une rotation)
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [retraitEnCours, setRetraitEnCours] = useState(null); // id du membre en cours de retrait
+  const [membresErr, setMembresErr] = useState('');
+  const [deverrou, setDeverrou] = useState(0); // relance le déverrouillage après une rotation
 
-  // Déverrouille l'identité de la boîte à l'ouverture
+  // Déverrouille l'identité de la boîte à l'ouverture (et ses anciennes clés)
   useEffect(() => {
     let alive = true;
-    boxPrivRef.current = null; setInfo(null); setError(''); setDetail(null); setSelected(null);
+    boxPrivRef.current = null; boxOldRef.current = []; setInfo(null); setError(''); setDetail(null); setSelected(null);
     (async () => {
       try {
         const { box: det } = await api.get(`/shared/${box.id}`);
         const boxKey = await unwrapKey(det.myEncKey, privateKey);
         boxPrivRef.current = await unwrapPrivateKeyAES(det.wrappedPrivateKey, boxKey);
+        boxOldRef.current = await Promise.all((det.oldPrivateKeys || []).map((k) => unwrapPrivateKeyAES(k, boxKey)));
         if (alive) setInfo(det);
       } catch { if (alive) setError("Impossible de déverrouiller cette boîte (clé indisponible)."); }
     })();
     return () => { alive = false; };
-  }, [box.id, privateKey]);
+  }, [box.id, privateKey, deverrou]);
 
   const decrypt = useCallback(async (o) => {
     if (!o.isEncrypted) return { subject: o.subject, body: o.body };
     if (!boxPrivRef.current || !o.encKey) return null;
-    try { return await decryptMessage(o.ciphertext, o.iv, o.encKey, boxPrivRef.current); } catch { return null; }
+    try { return await decryptMessageAvecCles(o.ciphertext, o.iv, o.encKey, [boxPrivRef.current, ...boxOldRef.current]); } catch { return null; }
   }, []);
+
+  // Retirer un membre (propriétaire) : on fait tourner les clés de la boîte ici, sur cet
+  // appareil, pour que l'ex-membre ne puisse rien ouvrir de ce qui arrivera ensuite.
+  async function retirerMembre(mem) {
+    if (!info || !boxPrivRef.current) return;
+    if (!window.confirm(`Retirer ${mem.displayName} de la boîte ?\n\nLes clés de la boîte vont changer : ${mem.displayName} ne pourra plus rien lire de ce qui arrive ensuite. Ce qu'il ou elle a déjà lu ne peut pas lui être repris.`)) return;
+    setMembresErr(''); setRetraitEnCours(mem.id);
+    try {
+      const restants = info.members.filter((x) => x.id !== mem.id);
+      const { keys } = await api.get(`/users/keys?emails=${encodeURIComponent(restants.map((x) => x.email).join(','))}`);
+      const clesMembres = {};
+      for (const x of restants) {
+        const pub = keys[normalizeEmail(x.email)] || keys[x.email];
+        if (!pub) throw new Error(`Clé de chiffrement introuvable pour ${x.displayName} : impossible de lui redonner accès.`);
+        clesMembres[x.id] = pub;
+      }
+      const rotation = await preparerRotationBoite({ boxPrivateKey: boxPrivRef.current, oldPrivateKeys: boxOldRef.current, clesMembres });
+      await api.post(`/shared/${box.id}/members/${mem.id}/retrait`, { keyVersion: info.keyVersion, ...rotation });
+      setDeverrou((n) => n + 1); onChanged?.();
+    } catch (err) { setMembresErr(err.message || 'Retrait impossible'); }
+    setRetraitEnCours(null);
+  }
 
   const load = useCallback(async () => {
     if (!info) return;
@@ -159,6 +187,7 @@ export default function SharedMail({ box, reloadKey, onChanged }) {
           ))}
           {folder === 'inbox' && <button className="icon-btn sm" onClick={() => setMineOnly((v) => !v)} style={{ fontWeight: mineOnly ? 700 : 400, color: mineOnly ? 'var(--accent)' : undefined }} title="N'afficher que les messages qui me sont assignés">À moi</button>}
           <button className="icon-btn sm" onClick={() => { loadRoutes(); setRoutesOpen(true); }} disabled={!info} title="Règles de routage (compte de reçu)"><Icon name="flow" size={15} /></button>
+          <button className="icon-btn sm" onClick={() => { setMembresErr(''); setMembersOpen(true); }} disabled={!info} title="Membres de la boîte"><Icon name="users" size={15} /></button>
           <button className="icon-btn sm" onClick={() => startCompose()} disabled={!info} title="Écrire"><Icon name="compose" size={15} /></button>
           {loading && <span className="spinner" style={{ width: 13, height: 13, borderWidth: 2 }} />}
         </div>
@@ -274,6 +303,38 @@ export default function SharedMail({ box, reloadKey, onChanged }) {
                 <button className="btn"><Icon name="plus" size={15} /> Ajouter la règle</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {membersOpen && info && (
+        <div className="modal-back" onMouseDown={(e) => { if (e.target === e.currentTarget) setMembersOpen(false); }}>
+          <div className="modal" style={{ maxWidth: 520 }}>
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Icon name="users" size={18} /> Membres de la boîte</h3>
+            <div className="setting-desc">
+              Chaque membre lit et écrit au nom de <b>{info.address}</b>.
+              {info.role === 'owner' && <> Retirer quelqu'un change les clés de la boîte : il ne pourra plus rien lire de ce qui arrive ensuite. Ce qu'il a déjà lu ne peut pas lui être repris.</>}
+            </div>
+            <div className="card" style={{ marginTop: 10 }}>
+              {info.members.map((mem) => (
+                <div key={mem.id} className="alias-row">
+                  <Avatar name={mem.displayName} color={mem.avatarColor} size={26} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{mem.displayName}{mem.id === user.id ? ' (vous)' : ''}</div>
+                    <div className="hint" style={{ margin: 0 }}>{mem.email} · {mem.role === 'owner' ? 'propriétaire' : 'membre'}</div>
+                  </div>
+                  {info.role === 'owner' && mem.id !== user.id && (
+                    <button className="btn ghost" onClick={() => retirerMembre(mem)} disabled={retraitEnCours != null}>
+                      {retraitEnCours === mem.id ? <><Icon name="lock" size={14} /> Changement des clés…</> : 'Retirer'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {membresErr && <div className="alert" style={{ marginTop: 8 }}>{membresErr}</div>}
+            <div className="modal-foot">
+              <button type="button" className="btn ghost" onClick={() => setMembersOpen(false)}>Fermer</button>
+            </div>
           </div>
         </div>
       )}

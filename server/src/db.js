@@ -529,6 +529,12 @@ ensureColumn('users', 'job_title', 'TEXT');
 ensureColumn('users', 'department', 'TEXT');
 ensureColumn('users', 'is_admin', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('users', 'is_box', 'INTEGER NOT NULL DEFAULT 0'); // compte = boîte partagée
+// Rotation des clés d'une boîte partagée au retrait d'un membre : version des clés
+// (verrou optimiste contre un ajout de membre concurrent) et anciennes clés privées de
+// la boîte, chiffrées sous la clé de boîte ACTUELLE (JSON, la plus récente d'abord) pour
+// que les membres restants lisent encore l'historique.
+ensureColumn('users', 'box_key_version', 'INTEGER NOT NULL DEFAULT 1');
+ensureColumn('users', 'box_old_keys', "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('users', 'listed', 'INTEGER NOT NULL DEFAULT 1'); // annuaire : comptes existants listés ; nouveaux comptes = 0 (opt-in)
 // Remise directe : DÉSACTIVÉE par défaut, et ce défaut compte. Une fois active, il
 // n'existe plus aucune copie en ligne du courrier reçu — c'est un choix que

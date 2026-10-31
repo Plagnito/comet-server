@@ -107,7 +107,8 @@ export async function decryptWithKeyB64(ciphertext, ivB64, keyB64) {
 // Sa clé privée est chiffrée (AES-GCM) sous une « clé de boîte » symétrique, elle-même
 // distribuée à chaque membre enveloppée par SA clé publique RSA (cf. wrapKeyFor/unwrapKey).
 // Ainsi : (1) le serveur ne voit que du chiffré ; (2) un nouveau membre reçoit la clé de
-// boîte et peut lire TOUT l'historique ; (3) retirer un membre suffit à lui couper l'accès.
+// boîte et peut lire TOUT l'historique ; (3) retirer un membre fait tourner les clés
+// (preparerRotationBoite) : couper son accès au serveur ne suffirait pas, il connaît la clé.
 export async function generateBoxIdentity() {
   const kp = await generateKeyPair();
   const publicKey = await exportPublicKey(kp);
@@ -128,6 +129,31 @@ export async function unwrapPrivateKeyAES(json, keyB64) {
   const key = await subtle.importKey('raw', ub64(keyB64), 'AES-GCM', false, ['decrypt']);
   const pkcs8 = await subtle.decrypt({ name: 'AES-GCM', iv: ub64(iv) }, key, ub64(data));
   return subtle.importKey('pkcs8', pkcs8, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['decrypt']);
+}
+
+// Rotation des clés d'une boîte partagée, au retrait d'un membre. Tout se prépare ici,
+// sur l'appareil du propriétaire : nouvelle paire de clés et nouvelle clé de boîte ; la
+// clé privée actuelle et les plus anciennes, rechiffrées sous la nouvelle clé de boîte
+// (la plus récente d'abord) pour garder l'historique lisible ; et la nouvelle clé de boîte
+// enveloppée pour chaque membre RESTANT ({ idMembre: cléPubliqueB64 }). L'ex-membre garde
+// ce qu'il a déjà lu, mais ne peut rien ouvrir de ce qui arrive après.
+export async function preparerRotationBoite({ boxPrivateKey, oldPrivateKeys = [], clesMembres }) {
+  const { publicKey, boxKey, wrappedPrivateKey } = await generateBoxIdentity();
+  const anciennes = [];
+  for (const cle of [boxPrivateKey, ...oldPrivateKeys]) anciennes.push(await wrapPrivateKeyAES(cle, boxKey));
+  const members = {};
+  for (const [id, pub] of Object.entries(clesMembres)) members[id] = await wrapKeyFor(boxKey, pub);
+  return { publicKey, wrappedPrivateKey, oldPrivateKeys: anciennes, members };
+}
+
+// Déchiffre avec la première clé qui convient : la clé actuelle d'une boîte, puis ses
+// anciennes clés (un message reçu avant une rotation reste chiffré pour l'ancienne).
+export async function decryptMessageAvecCles(ciphertext, iv, encKey, cles) {
+  for (const cle of cles) {
+    if (!cle) continue;
+    try { return await decryptMessage(ciphertext, iv, encKey, cle); } catch { /* clé suivante */ }
+  }
+  throw new Error('Aucune clé de cette boîte ne déchiffre ce message');
 }
 
 // Empreinte de sécurité d'une clé publique (à comparer entre correspondants pour

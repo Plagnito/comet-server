@@ -132,6 +132,7 @@ router.get('/:id', (req, res) => {
     box: {
       id: box.id, address: box.email, name: box.display_name, color: box.avatar_color,
       publicKey: box.public_key, wrappedPrivateKey: box.enc_private_key, myEncKey: m.enc_key, role: m.role, members,
+      keyVersion: box.box_key_version, oldPrivateKeys: anciennesCles(box),
     },
   });
 });
@@ -270,22 +271,76 @@ router.patch('/:id/messages/:itemId', (req, res) => {
 });
 
 // ── Ajouter des membres (n'importe quel membre re-distribue la clé de boîte) ──
+// La clé envoyée doit être celle de la version ACTUELLE : une clé enveloppée juste avant
+// une rotation ne déverrouillerait plus rien, et donnerait au nouveau membre l'ancienne
+// clé de boîte, celle que l'ex-membre connaît.
 router.post('/:id/members', (req, res) => {
   const m = membership(req.params.id, req.user.id);
   if (!m) return res.status(403).json({ error: 'Non membre' });
+  const box = db.prepare('SELECT box_key_version FROM users WHERE id = ? AND is_box = 1').get(req.params.id);
+  if (!box) return res.status(404).json({ error: 'Boîte introuvable' });
+  if (Number(req.body?.keyVersion) !== box.box_key_version) return res.status(409).json({ error: 'Les clés de la boîte ont changé : rouvrez-la puis recommencez.', code: 'cle-perimee' });
   const ins = db.prepare("INSERT OR IGNORE INTO shared_mailbox_members (box_id, user_id, enc_key, role) VALUES (?, ?, ?, 'member')");
   let added = 0;
   for (const [email, encKey] of Object.entries(req.body.members || {})) { const id = emailToId(email); if (id && encKey) { ins.run(req.params.id, id, encKey); added++; } }
   res.json({ added });
 });
 
-// ── Retirer un membre (propriétaire) ─────────────────────────────────────────
-router.delete('/:id/members/:userId', (req, res) => {
+// ── Retirer un membre (propriétaire), avec rotation des clés ─────────────────
+// Retirer l'accès au serveur ne suffit pas : l'ex-membre connaît la clé de boîte, donc la
+// clé privée de la boîte. Le propriétaire envoie, préparés sur SON appareil (le serveur
+// ne voit rien en clair) : une nouvelle paire de clés pour la boîte, sa clé privée
+// chiffrée sous une nouvelle clé de boîte, les anciennes clés privées rechiffrées sous
+// celle-ci (pour l'historique), et la nouvelle clé de boîte enveloppée pour CHAQUE membre
+// restant — ni plus, ni moins. Le courrier envoyé ensuite à la boîte utilise la nouvelle
+// clé publique ; ce que l'ex-membre a déjà lu, il l'a lu (limite documentée).
+const texteCourt = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+export function anciennesCles(box) {
+  try { const l = JSON.parse(box.box_old_keys || '[]'); return Array.isArray(l) ? l : []; } catch { return []; }
+}
+router.delete('/:id/members/:userId', (_req, res) => res.status(410).json({
+  error: 'Retirer un membre fait désormais tourner les clés de la boîte : mettez Comet à jour.', code: 'rotation-requise',
+}));
+router.post('/:id/members/:userId/retrait', (req, res) => {
   const m = membership(req.params.id, req.user.id);
   if (!m || m.role !== 'owner') return res.status(403).json({ error: 'Réservé au propriétaire' });
-  if (Number(req.params.userId) === req.user.id) return res.status(400).json({ error: 'Le propriétaire ne peut se retirer' });
-  db.prepare('DELETE FROM shared_mailbox_members WHERE box_id = ? AND user_id = ?').run(req.params.id, req.params.userId);
-  res.json({ ok: true });
+  const cible = Number(req.params.userId);
+  if (cible === req.user.id) return res.status(400).json({ error: 'Le propriétaire ne peut se retirer' });
+  const box = db.prepare('SELECT * FROM users WHERE id = ? AND is_box = 1').get(req.params.id);
+  if (!box) return res.status(404).json({ error: 'Boîte introuvable' });
+  if (!membership(box.id, cible)) return res.status(404).json({ error: 'Ce compte n’est pas membre de la boîte' });
+
+  const { keyVersion, publicKey, wrappedPrivateKey, oldPrivateKeys, members } = req.body || {};
+  if (Number(keyVersion) !== box.box_key_version) return res.status(409).json({ error: 'Les clés de la boîte ont changé : rouvrez-la puis recommencez.', code: 'cle-perimee' });
+  if (!texteCourt(publicKey, 4096) || !texteCourt(wrappedPrivateKey, 8192)) return res.status(400).json({ error: 'Nouvelles clés de boîte manquantes' });
+  if (publicKey === box.public_key) return res.status(400).json({ error: 'La clé publique de la boîte doit changer' });
+  // Historique : toutes les anciennes clés, plus celle qu'on remplace (au moins une de plus).
+  const anciennes = anciennesCles(box);
+  if (!Array.isArray(oldPrivateKeys) || oldPrivateKeys.length !== anciennes.length + 1 || !oldPrivateKeys.every((k) => texteCourt(k, 8192))) {
+    return res.status(400).json({ error: 'Anciennes clés de la boîte incomplètes : l’historique deviendrait illisible' });
+  }
+  // Exactement les membres restants : personne d'oublié (il perdrait l'accès), et surtout
+  // pas l'ex-membre ni un compte étranger à la boîte.
+  const restants = db.prepare('SELECT user_id FROM shared_mailbox_members WHERE box_id = ? AND user_id <> ?').all(box.id, cible).map((r) => r.user_id);
+  const fournis = members && typeof members === 'object' ? Object.keys(members).map(Number) : [];
+  const attendu = new Set(restants);
+  if (fournis.length !== attendu.size || !fournis.every((id) => attendu.has(id)) || !fournis.every((id) => texteCourt(members[id], 2048))) {
+    return res.status(400).json({ error: 'La nouvelle clé doit être fournie pour chaque membre restant, et pour eux seuls' });
+  }
+
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM shared_mailbox_members WHERE box_id = ? AND user_id = ?').run(box.id, cible);
+    const maj = db.prepare('UPDATE shared_mailbox_members SET enc_key = ? WHERE box_id = ? AND user_id = ?');
+    for (const id of fournis) maj.run(members[id], box.id, id);
+    db.prepare('UPDATE users SET public_key = ?, enc_private_key = ?, box_old_keys = ?, box_key_version = box_key_version + 1 WHERE id = ?')
+      .run(publicKey, wrappedPrivateKey, JSON.stringify(oldPrivateKeys), box.id);
+    // L'ex-membre ne reste ni destinataire d'une règle de routage, ni assigné d'un message.
+    db.prepare('DELETE FROM box_routes WHERE box_id = ? AND assignee_id = ?').run(box.id, cible);
+    db.prepare('UPDATE mail_items SET assigned_to = NULL WHERE user_id = ? AND assigned_to = ?').run(box.id, cible);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  res.json({ ok: true, keyVersion: box.box_key_version + 1 });
 });
 
 // ── Règles de routage (« compte de reçu ») ───────────────────────────────────

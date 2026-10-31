@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../db.js';
 import { authRequired } from '../auth.js';
+import { voit } from '../services/visibilite.js';
 
 const router = Router();
 router.use(authRequired);
@@ -138,13 +139,20 @@ router.get('/', async (req, res) => {
 });
 
 // ── Disponibilités (free/busy) des collègues sur une plage ───────────────────
+// Disponibilités : créneaux occupés (heures seulement, jamais les titres) des seuls comptes
+// dont on voit la présence — même organisation, ou personne ayant écrit dans un canal
+// commun (services/visibilite.js). Pour tout autre adresse, la réponse est « inconnu »
+// (null), exactement comme pour une adresse qui n'existe pas : on n'apprend même pas si
+// elle a un compte.
+export const FREEBUSY_MAX = 50;
 router.get('/freebusy', (req, res) => {
-  const emails = String(req.query.emails || '').split(',').map((e) => e.trim()).filter(Boolean);
+  const emails = [...new Set(String(req.query.emails || '').split(',').map((e) => e.trim()).filter(Boolean))];
+  if (emails.length > FREEBUSY_MAX) return res.status(400).json({ error: `Au plus ${FREEBUSY_MAX} adresses à la fois` });
   const { from, to } = req.query;
   const busy = {};
   for (const email of emails) {
     const id = emailToId(email);
-    if (!id) { busy[email] = null; continue; } // inconnu
+    if (!id || !voit(req.user.id, id)) { busy[email] = null; continue; } // inconnu, ou non visible
     let sql = `SELECT e.starts_at AS startsAt, e.ends_at AS endsAt FROM events e
                LEFT JOIN event_invites ei ON ei.event_id = e.id AND ei.user_id = ?
                WHERE (e.owner_id = ? OR (ei.user_id = ? AND ei.status = 'accepted'))`;

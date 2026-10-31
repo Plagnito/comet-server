@@ -8,6 +8,18 @@ import {
 import { JWT_SECRET as SECRET } from './config.js';
 import { db } from './db.js';
 import { userForSession } from './auth.js';
+import { visiblesPar, audienceDe, ontEchange, orgDe, voit } from './services/visibilite.js';
+
+// Taille maximale d'un message WebSocket (une offre SDP fait quelques Ko) et débit
+// maximal par socket : au-delà, les messages sont ignorés.
+export const TAILLE_MAX_MESSAGE = 64 * 1024;
+export const MESSAGES_MAX = 200;           // par fenêtre de...
+export const FENETRE_MS = 10_000;           // ...10 secondes
+function debitDepasse(ws, maintenant = Date.now()) {
+  if (!ws.debit || maintenant - ws.debit.depuis >= FENETRE_MS) ws.debit = { depuis: maintenant, n: 0 };
+  ws.debit.n += 1;
+  return ws.debit.n > MESSAGES_MAX;
+}
 
 const clients = new Map(); // userId -> Set<ws>
 const liveSession = (ws) => {
@@ -37,7 +49,11 @@ function confJoin(ws, roomId, name) {
   if (!roomId) return;
   const room = getRoom(roomId);
   if (!room) { ws.send(JSON.stringify({ type: 'conf:error', code: 'room-not-found' })); return; }
-  if (ws.isGuest && !room.config.linkEnabled) { ws.send(JSON.stringify({ type: 'conf:error', code: 'link-disabled' })); return; }
+  // Qui entre : l'hôte, les membres de son organisation, et — seulement si l'hôte laisse
+  // les liens d'invitation actifs — quiconque a le lien (invité sans compte ou autre compte).
+  const estHote = !ws.isGuest && ws.userId === room.hostId;
+  const memeOrgHote = !ws.isGuest && !!room.hostOrgId && orgDe(ws.userId) === room.hostOrgId;
+  if (!estHote && !memeOrgHote && !room.config.linkEnabled) { ws.send(JSON.stringify({ type: 'conf:error', code: 'link-disabled' })); return; }
   if (!ws.isGuest && room.banned.has(banKeyForUser(ws.userId))) { ws.send(JSON.stringify({ type: 'conf:error', code: 'banned' })); return; }
 
   ws.peerId = ws.peerId || randomPeerId();
@@ -69,7 +85,10 @@ function confLeave(ws, roomId) {
 }
 
 function confSignal(ws, roomId, to, data) {
-  const target = confSockets.get(roomId)?.get(to);
+  // Seul un participant du salon relaie vers un autre participant du même salon.
+  const sockets = confSockets.get(roomId);
+  if (!sockets || !ws.peerId || sockets.get(ws.peerId) !== ws) return;
+  const target = sockets.get(to);
   if (target && liveSession(target)) target.send(JSON.stringify({ type: 'conf:signal', room: roomId, from: ws.peerId, data }));
 }
 
@@ -127,18 +146,34 @@ export function notifyUser(userId, obj) {
     .catch(() => { /* push indisponible : le mail arrive quand même, il sera vu à l'ouverture */ });
 }
 
-function broadcast(obj, exceptUserId) {
-  const data = JSON.stringify(obj);
-  for (const [uid, set] of clients) {
-    if (uid === exceptUserId) continue;
-    for (const ws of set) { if (liveSession(ws)) ws.send(data); }
+// Annonce l'arrivée ou le départ de `userId` aux seuls comptes qui ont le droit de voir
+// sa présence (services/visibilite.js), pas à toute l'instance.
+function annoncerPresence(userId, online) {
+  const data = JSON.stringify({ type: 'presence', userId, online });
+  for (const uid of audienceDe(userId)) {
+    for (const ws of clients.get(uid) || []) { if (liveSession(ws)) ws.send(data); }
   }
 }
 
+// Relais de signalisation des pièces jointes en pair-à-pair : seulement entre deux comptes
+// qui ont échangé du courrier ou qui se voient (même organisation, canal commun). Le
+// verdict est gardé par socket : une offre WebRTC envoie des dizaines de candidats.
+function rtcAutorise(ws, to) {
+  const cache = ws.rtcOk || (ws.rtcOk = new Map());
+  if (!cache.has(to)) cache.set(to, ontEchange(ws.userId, to) || voit(ws.userId, to));
+  return cache.get(to);
+}
+
 export function attachWebSocket(server) {
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: TAILLE_MAX_MESSAGE });
 
   wss.on('connection', (ws, req) => {
+    // Une trame invalide ou trop grosse (maxPayload) fait émettre « error » au socket.
+    // Sans écouteur, c'est une exception non attrapée, et le serveur s'arrête sur toute
+    // exception non attrapée (server.js) : un seul client pourrait le faire tomber.
+    // L'écouteur suffit : la bibliothèque ferme déjà ce socket-là, et seulement lui, avec
+    // le bon code (1009 pour un message trop gros) ; le couper ici l'en empêcherait.
+    ws.on('error', () => { /* socket fermé par la bibliothèque */ });
     let userId;
     try {
       const token = new URL(req.url, 'http://x').searchParams.get('token');
@@ -167,7 +202,7 @@ export function attachWebSocket(server) {
       ws.isAlive = true;
       ws.on('pong', () => { ws.isAlive = true; });
       ws.on('message', (raw) => {
-        if (!liveSession(ws)) return;
+        if (!liveSession(ws) || debitDepasse(ws)) return;
         let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
         if (msg.type === 'conf:join') confJoin(ws, ws.guestRoom, msg.name); // un invité ne rejoint que SON salon
         else if (msg.type === 'conf:leave') confLeave(ws, ws.guestRoom);
@@ -182,15 +217,18 @@ export function attachWebSocket(server) {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
-    ws.send(JSON.stringify({ type: 'presence:init', online: onlineUserIds() }));
-    if (wasOffline) broadcast({ type: 'presence', userId, online: true }, userId);
+    // Présence initiale : seulement les comptes que l'on a le droit de voir.
+    const visibles = visiblesPar(userId);
+    ws.send(JSON.stringify({ type: 'presence:init', online: onlineUserIds().filter((id) => visibles.has(id)) }));
+    if (wasOffline) annoncerPresence(userId, true);
 
     ws.on('message', (raw) => {
-      if (!liveSession(ws)) return;
+      if (!liveSession(ws) || debitDepasse(ws)) return;
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
       if (msg.type === 'rtc:signal' && msg.to) {
-        notifyUser(Number(msg.to), { type: 'rtc:signal', from: userId, data: msg.data });
+        const to = Number(msg.to);
+        if (rtcAutorise(ws, to)) notifyUser(to, { type: 'rtc:signal', from: userId, data: msg.data });
       } else if (msg.type === 'conf:join') {
         confJoin(ws, String(msg.room || ''), msg.name);
       } else if (msg.type === 'conf:leave') {
@@ -207,7 +245,7 @@ export function attachWebSocket(server) {
     ws.on('close', () => {
       if (ws.confJoined) for (const room of [...ws.confJoined]) confLeave(ws, room);
       const wentOffline = remove(userId, ws);
-      if (wentOffline) broadcast({ type: 'presence', userId, online: false }, userId);
+      if (wentOffline) annoncerPresence(userId, false);
     });
   });
 
