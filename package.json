@@ -1,6 +1,6 @@
 {
   "name": "comet",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "author": "Plagnito",
   "description": "Comet — suite de productivité native (mail E2EE, calendrier, contacts, tâches, notes)",
