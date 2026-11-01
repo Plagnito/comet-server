@@ -23,6 +23,7 @@ export function createRoom({ hostId, hostName, name, hostOrgId }) {
     emptyAt: Date.now(),
     config: { video: '720p', audio: 'high', linkEnabled: true },
     banned: new Set(),        // clés 'u:<userId>' ou 'g:<peerId>'
+    guestLinkRevoked: false, // Un invité anonyme exclu peut toujours connaître l'ancien lien.
     participants: new Map(),  // peerId -> { name, guest, userId, host }
   };
   rooms.set(id, room);
@@ -34,7 +35,9 @@ export const getRoom = (id) => rooms.get(id);
 export function setConfig(room, patch = {}) {
   if (VIDEO[patch.video]) room.config.video = patch.video;
   if (AUDIO[patch.audio]) room.config.audio = patch.audio;
-  if (typeof patch.linkEnabled === 'boolean') room.config.linkEnabled = patch.linkEnabled;
+  // Après exclusion d'un invité anonyme, le lien ne peut plus être réactivé :
+  // sans identité vérifiable, un nouveau jeton serait impossible à distinguer.
+  if (typeof patch.linkEnabled === 'boolean') room.config.linkEnabled = patch.linkEnabled && !room.guestLinkRevoked;
   return room.config;
 }
 
@@ -46,6 +49,11 @@ export function removeParticipant(room, peerId) {
 
 export const banKeyForUser = (userId) => 'u:' + userId;
 export const banKeyForGuest = (peerId) => 'g:' + peerId;
+
+export function revokeGuestInvitations(room) {
+  room.guestLinkRevoked = true;
+  room.config.linkEnabled = false;
+}
 
 export function issueGuestToken(room, name) {
   return jwt.sign({ guest: true, room: room.id, name: String(name || 'Invité').slice(0, 40) }, SECRET, { expiresIn: '4h' });
