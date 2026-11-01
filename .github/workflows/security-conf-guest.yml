@@ -1,0 +1,31 @@
+name: Security conference guest revocation
+
+on:
+  pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/security-conf-guest.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  server-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked server dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Conference guest revocation regression (HTTP and WebSocket)
+        run: npm test -- test/autorisations-equipe.test.js
+      - name: Full server regression suite
+        run: npm test
