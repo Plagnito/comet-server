@@ -175,6 +175,53 @@ describe('visio : entrée (C-11) et signalisation (C-12)', () => {
     expect((await attendre(wsHote, (m) => m.type === 'conf:signal')).data).toEqual({ sdp: 'vrai' });
   });
 
+  it('exclusion d’un invité anonyme : même socket, ancien JWT et nouveau jeton refusés', async () => {
+    const org = nouvelleOrg();
+    const hote = compte({ org });
+    const collegue = compte({ org });
+    const room = createRoom({ hostId: hote.id, hostName: 'Hôte', name: 'Réunion', hostOrgId: org });
+    const { ws: wsHote } = await connecte(hote);
+    envoyer(wsHote, { type: 'conf:join', room: room.id, name: 'Hôte' });
+    await attendre(wsHote, (m) => m.type === 'conf:peers' && m.room === room.id);
+
+    // Invitation normale : le serveur HTTP émet un JWT fictif et le WS accepte.
+    const invitation = await request(server).post(`/api/conf/rooms/${room.id}/guest`).send({ name: 'Invité A' });
+    expect(invitation.status).toBe(200);
+    const wsInvite = ouvrir(invitation.body.token);
+    envoyer(wsInvite, { type: 'conf:join', room: room.id, name: 'Invité A' });
+    const arrivee = await attendre(wsInvite, (m) => m.type === 'conf:peers' && m.room === room.id);
+    expect(arrivee.you).toBeTruthy();
+
+    envoyer(wsHote, { type: 'conf:kick', room: room.id, to: arrivee.you });
+    await attendre(wsInvite, (m) => m.type === 'conf:kicked' && m.room === room.id);
+    expect(room.config.linkEnabled).toBe(false);
+
+    // Le même socket conserve son peerId : le bannissement doit tenir.
+    envoyer(wsInvite, { type: 'conf:join', room: room.id, name: 'Invité A' });
+    expect(await attendre(wsInvite, (m) => m.type === 'conf:error' && m.code === 'banned'))
+      .toMatchObject({ code: 'banned' });
+
+    // Nouveau socket, ancien JWT : l'invitation entière a été révoquée.
+    const wsAncienJwt = ouvrir(invitation.body.token);
+    envoyer(wsAncienJwt, { type: 'conf:join', room: room.id, name: 'Invité A' });
+    expect(await attendre(wsAncienJwt, (m) => m.type === 'conf:error' && m.code === 'link-disabled'))
+      .toMatchObject({ code: 'link-disabled' });
+
+    // L'API publique ne doit pas fournir un nouveau JWT, même en changeant de nom.
+    const nouveau = await request(server).post(`/api/conf/rooms/${room.id}/guest`).send({ name: 'Autre nom' });
+    expect(nouveau.status).toBe(403);
+
+    // L'hôte ne peut réactiver l'ancien lien : il faut créer un nouveau salon.
+    envoyer(wsHote, { type: 'conf:config', room: room.id, config: { linkEnabled: true } });
+    await attendre(wsHote, (m) => m.type === 'conf:config' && m.room === room.id && m.config.linkEnabled === false);
+    expect(room.config.linkEnabled).toBe(false);
+
+    // La révocation des invitations n'exclut pas les membres de l'organisation.
+    const { ws: wsCollegue } = await connecte(collegue);
+    envoyer(wsCollegue, { type: 'conf:join', room: room.id, name: 'Collègue' });
+    expect((await attendre(wsCollegue, (m) => m.type === 'conf:peers' && m.room === room.id)).type).toBe('conf:peers');
+  });
+
   it('borne le débit par socket et la taille d’un message', async () => {
     const o = nouvelleOrg(); const hote = compte({ org: o }); const membre = compte({ org: o });
     const room = createRoom({ hostId: hote.id, hostName: 'Hôte', name: 'R', hostOrgId: o });
