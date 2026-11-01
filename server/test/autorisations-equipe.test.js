@@ -188,6 +188,7 @@ describe('visio : entrée (C-11) et signalisation (C-12)', () => {
     const invitation = await request(server).post(`/api/conf/rooms/${room.id}/guest`).send({ name: 'Invité A' });
     expect(invitation.status).toBe(200);
     const wsInvite = ouvrir(invitation.body.token);
+    await new Promise((resolve) => wsInvite.once('open', resolve));
     envoyer(wsInvite, { type: 'conf:join', room: room.id, name: 'Invité A' });
     const arrivee = await attendre(wsInvite, (m) => m.type === 'conf:peers' && m.room === room.id);
     expect(arrivee.you).toBeTruthy();
@@ -203,6 +204,7 @@ describe('visio : entrée (C-11) et signalisation (C-12)', () => {
 
     // Nouveau socket, ancien JWT : l'invitation entière a été révoquée.
     const wsAncienJwt = ouvrir(invitation.body.token);
+    await new Promise((resolve) => wsAncienJwt.once('open', resolve));
     envoyer(wsAncienJwt, { type: 'conf:join', room: room.id, name: 'Invité A' });
     expect(await attendre(wsAncienJwt, (m) => m.type === 'conf:error' && m.code === 'link-disabled'))
       .toMatchObject({ code: 'link-disabled' });
