@@ -22,6 +22,29 @@ function debitDepasse(ws, maintenant = Date.now()) {
   return ws.debit.n > MESSAGES_MAX;
 }
 
+// Ne jamais faire de coercition implicite d'objets JSON non fiables dans le
+// répartiteur (String/Number peuvent lever une exception hors de JSON.parse).
+function messageValide(raw) {
+  let msg;
+  try { msg = JSON.parse(raw.toString()); } catch { return null; }
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.type !== 'string') return null;
+  const id = (v) => typeof v === 'string' && v.length > 0;
+  const cible = (v) => id(v) || (typeof v === 'number' && Number.isSafeInteger(v) && v > 0);
+  if (msg.type === 'rtc:signal' && !cible(msg.to)) return null;
+  if (msg.type.startsWith('conf:')) {
+    if (msg.room !== undefined && typeof msg.room !== 'string') return null;
+    if (msg.name !== undefined && typeof msg.name !== 'string') return null;
+    if (['conf:signal', 'conf:kick'].includes(msg.type) && !cible(msg.to)) return null;
+    if (msg.type === 'conf:config' && msg.config !== undefined
+      && (!msg.config || typeof msg.config !== 'object' || Array.isArray(msg.config))) return null;
+  }
+  return msg;
+}
+
+function fermerMessageInvalide(ws) {
+  try { ws.close(1008, 'message-invalide'); } catch { try { ws.terminate(); } catch {} }
+}
+
 const clients = new Map(); // userId -> Set<ws>
 const liveSession = (ws) => {
   if (ws.readyState !== ws.OPEN) return false;
@@ -223,11 +246,14 @@ export function attachWebSocket(server) {
       ws.isAlive = true;
       ws.on('pong', () => { ws.isAlive = true; });
       ws.on('message', (raw) => {
-        if (!liveSession(ws) || debitDepasse(ws)) return;
-        let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
-        if (msg.type === 'conf:join') confJoin(ws, ws.guestRoom, msg.name); // un invité ne rejoint que SON salon
-        else if (msg.type === 'conf:leave') confLeave(ws, ws.guestRoom);
-        else if (msg.type === 'conf:signal' && msg.to) confSignal(ws, ws.guestRoom, String(msg.to), msg.data);
+        try {
+          if (!liveSession(ws) || debitDepasse(ws)) return;
+          const msg = messageValide(raw);
+          if (!msg) { fermerMessageInvalide(ws); return; }
+          if (msg.type === 'conf:join') confJoin(ws, ws.guestRoom, msg.name); // un invité ne rejoint que SON salon
+          else if (msg.type === 'conf:leave') confLeave(ws, ws.guestRoom);
+          else if (msg.type === 'conf:signal' && msg.to) confSignal(ws, ws.guestRoom, String(msg.to), msg.data);
+        } catch { fermerMessageInvalide(ws); }
       });
       ws.on('close', () => { if (ws.confJoined) for (const room of [...ws.confJoined]) confLeave(ws, room); });
     }
@@ -246,23 +272,27 @@ export function attachWebSocket(server) {
     if (wasOffline) annoncerPresence(userId, true);
 
     ws.on('message', (raw) => {
-      if (!liveSession(ws) || debitDepasse(ws)) return;
-      let msg;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
-      if (msg.type === 'rtc:signal' && msg.to) {
-        const to = Number(msg.to);
-        if (rtcAutorise(ws, to)) notifyUser(to, { type: 'rtc:signal', from: userId, data: msg.data });
-      } else if (msg.type === 'conf:join') {
-        confJoin(ws, String(msg.room || ''), msg.name);
-      } else if (msg.type === 'conf:leave') {
-        confLeave(ws, String(msg.room || ''));
-      } else if (msg.type === 'conf:signal' && msg.to) {
-        confSignal(ws, String(msg.room || ''), String(msg.to), msg.data);
-      } else if (msg.type === 'conf:kick' && msg.to) {
-        confKick(ws, String(msg.room || ''), String(msg.to));
-      } else if (msg.type === 'conf:config') {
-        confConfig(ws, String(msg.room || ''), msg.config);
-      }
+      try {
+        if (!liveSession(ws) || debitDepasse(ws)) return;
+        const msg = messageValide(raw);
+        if (!msg) { fermerMessageInvalide(ws); return; }
+        if (msg.type === 'rtc:signal' && msg.to) {
+          const to = Number(msg.to);
+          if (Number.isSafeInteger(to) && to > 0 && rtcAutorise(ws, to)) {
+            notifyUser(to, { type: 'rtc:signal', from: userId, data: msg.data });
+          }
+        } else if (msg.type === 'conf:join') {
+          confJoin(ws, msg.room || '', msg.name);
+        } else if (msg.type === 'conf:leave') {
+          confLeave(ws, msg.room || '');
+        } else if (msg.type === 'conf:signal' && msg.to) {
+          confSignal(ws, msg.room || '', String(msg.to), msg.data);
+        } else if (msg.type === 'conf:kick' && msg.to) {
+          confKick(ws, msg.room || '', String(msg.to));
+        } else if (msg.type === 'conf:config') {
+          confConfig(ws, msg.room || '', msg.config);
+        }
+      } catch { fermerMessageInvalide(ws); }
     });
 
     ws.on('close', () => {
