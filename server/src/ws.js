@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import {
   getRoom, addParticipant, removeParticipant, setConfig,
-  banKeyForUser, banKeyForGuest,
+  banKeyForUser, banKeyForGuest, revokeGuestInvitations,
 } from './services/confrooms.js';
 import { JWT_SECRET as SECRET } from './config.js';
 import { db } from './db.js';
@@ -77,10 +77,12 @@ function confJoin(ws, roomId, name) {
   // les liens d'invitation actifs — quiconque a le lien (invité sans compte ou autre compte).
   const estHote = !ws.isGuest && ws.userId === room.hostId;
   const memeOrgHote = !ws.isGuest && !!room.hostOrgId && orgDe(ws.userId) === room.hostOrgId;
-  if (!estHote && !memeOrgHote && !room.config.linkEnabled) { ws.send(JSON.stringify({ type: 'conf:error', code: 'link-disabled' })); return; }
-  if (!ws.isGuest && room.banned.has(banKeyForUser(ws.userId))) { ws.send(JSON.stringify({ type: 'conf:error', code: 'banned' })); return; }
-
   ws.peerId = ws.peerId || randomPeerId();
+  // La même socket conserve son peerId après kick. Un invité anonyme peut aussi
+  // obtenir un nouveau jeton : le lien entier est révoqué lors de son exclusion.
+  const banKey = ws.isGuest ? banKeyForGuest(ws.peerId) : banKeyForUser(ws.userId);
+  if (room.banned.has(banKey)) { ws.send(JSON.stringify({ type: 'conf:error', code: 'banned' })); return; }
+  if (!estHote && !memeOrgHote && !room.config.linkEnabled) { ws.send(JSON.stringify({ type: 'conf:error', code: 'link-disabled' })); return; }
   ws.confName = String(name || ws.guestName || 'Invité').slice(0, 60);
   const isHost = !ws.isGuest && ws.userId === room.hostId;
 
@@ -123,8 +125,12 @@ function confKick(ws, roomId, targetPeerId) {
   const target = confSockets.get(roomId)?.get(targetPeerId);
   if (!target || target === ws) return;
   room.banned.add(target.isGuest ? banKeyForGuest(targetPeerId) : banKeyForUser(target.userId));
+  // Sans identité persistante, bloquer seulement le peerId ou le JWT ne suffit
+  // pas : la route publique délivrerait un nouveau jeton pour le même lien.
+  if (target.isGuest) revokeGuestInvitations(room);
   try { target.send(JSON.stringify({ type: 'conf:kicked', room: roomId })); } catch {}
   confLeave(target, roomId);
+  if (target.isGuest) confBroadcast(roomId, { type: 'conf:config', room: roomId, config: room.config });
 }
 
 // Modifier la config du salon (hôte uniquement) → diffusée à tous.
