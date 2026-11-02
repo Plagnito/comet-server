@@ -9,7 +9,7 @@ import { app } from '../src/server.js';
 import { db } from '../src/db.js';
 import { hashPassword, signToken } from '../src/auth.js';
 import { attachWebSocket, TAILLE_MAX_MESSAGE, MESSAGES_MAX } from '../src/ws.js';
-import { createRoom, setConfig } from '../src/services/confrooms.js';
+import { createRoom, setConfig, issueGuestToken } from '../src/services/confrooms.js';
 import { voit, ontEchange } from '../src/services/visibilite.js';
 
 let server; let wss;
@@ -261,5 +261,55 @@ describe('relais des pièces jointes en pair-à-pair', () => {
     const { ws: wsAlice2 } = await connecte(alice);       // nouveau socket : verdict recalculé
     envoyer(wsAlice2, { type: 'rtc:signal', to: bob.id, data: 'offre-2' });
     expect((await attendre(wsBob, (m) => m.type === 'rtc:signal')).data).toBe('offre-2');
+  });
+});
+
+
+describe('F-D6D44F : isolation des messages WebSocket invalides', () => {
+  function attendreFermeture(ws) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('socket invalide non fermé')), 3000);
+      ws.once('close', (code) => { clearTimeout(timer); resolve(code); });
+    });
+  }
+
+  it.each([
+    ['JSON null', 'null'],
+    ['destination RTC non primitive', JSON.stringify({ type: 'rtc:signal', to: { toString: null, valueOf: null }, data: 'x' })],
+    ['identifiant de salon non primitif', JSON.stringify({ type: 'conf:join', room: { toString: null, valueOf: null }, name: 'x' })],
+    ['nom de participant non primitif', JSON.stringify({ type: 'conf:join', room: 'salon-fictif', name: { toString: null, valueOf: null } })],
+  ])('rejette %s sans interrompre les autres comptes', async (_label, payload) => {
+    const sain = compte({ org: nouvelleOrg() });
+    const fautif = compte({ org: nouvelleOrg() });
+    const { ws: wsSain } = await connecte(sain);
+    const { ws: wsFautif } = await connecte(fautif);
+    const fermeture = attendreFermeture(wsFautif);
+    wsFautif.send(payload);
+    expect(await fermeture).toBe(1008);
+    const room = createRoom({ hostId: sain.id, hostName: 'Sain', name: 'Témoin', hostOrgId: null });
+    envoyer(wsSain, { type: 'conf:join', room: room.id, name: 'Sain' });
+    expect((await attendre(wsSain, (m) => m.type === 'conf:peers' && m.room === room.id)).you).toBeTruthy();
+  });
+
+  it('rejette un message invité invalide et conserve le salon et ses participants sains', async () => {
+    const hote = compte({ org: nouvelleOrg() });
+    const room = createRoom({ hostId: hote.id, hostName: 'Hôte', name: 'Témoin invité', hostOrgId: null });
+    const { ws: wsHote } = await connecte(hote);
+    envoyer(wsHote, { type: 'conf:join', room: room.id, name: 'Hôte' });
+    await attendre(wsHote, (m) => m.type === 'conf:peers' && m.room === room.id);
+
+    const invite = ouvrir(issueGuestToken(room, 'Invité'));
+    await new Promise((resolve, reject) => { invite.once('open', resolve); invite.once('error', reject); });
+    envoyer(invite, { type: 'conf:join', name: 'Invité' });
+    await attendre(invite, (m) => m.type === 'conf:peers' && m.room === room.id);
+    const fermeture = attendreFermeture(invite);
+    invite.send(JSON.stringify({ type: 'conf:signal', to: { toString: null, valueOf: null }, data: 'x' }));
+    expect(await fermeture).toBe(1008);
+
+    const autre = ouvrir(issueGuestToken(room, 'Témoin'));
+    await new Promise((resolve, reject) => { autre.once('open', resolve); autre.once('error', reject); });
+    envoyer(autre, { type: 'conf:join', name: 'Témoin' });
+    expect((await attendre(autre, (m) => m.type === 'conf:peers' && m.room === room.id)).you).toBeTruthy();
+    expect(wsHote.readyState).toBe(WebSocket.OPEN);
   });
 });
