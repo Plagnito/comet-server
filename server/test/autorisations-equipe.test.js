@@ -275,6 +275,9 @@ describe('F-D6D44F : isolation des messages WebSocket invalides', () => {
 
   it.each([
     ['JSON null', 'null'],
+    ['tableau JSON', '[]'],
+    ['type non textuel', JSON.stringify({ type: { valueOf: null } })],
+    ['configuration de salon non objet', JSON.stringify({ type: 'conf:config', room: 'salon-fictif', config: null })],
     ['destination RTC non primitive', JSON.stringify({ type: 'rtc:signal', to: { toString: null, valueOf: null }, data: 'x' })],
     ['identifiant de salon non primitif', JSON.stringify({ type: 'conf:join', room: { toString: null, valueOf: null }, name: 'x' })],
     ['nom de participant non primitif', JSON.stringify({ type: 'conf:join', room: 'salon-fictif', name: { toString: null, valueOf: null } })],
@@ -291,7 +294,10 @@ describe('F-D6D44F : isolation des messages WebSocket invalides', () => {
     expect((await attendre(wsSain, (m) => m.type === 'conf:peers' && m.room === room.id)).you).toBeTruthy();
   });
 
-  it('rejette un message invité invalide et conserve le salon et ses participants sains', async () => {
+  it.each([
+    ['destination non primitive', JSON.stringify({ type: 'conf:signal', to: { toString: null, valueOf: null }, data: 'x' })],
+    ['JSON null', 'null'],
+  ])('rejette un message invité invalide (%s) et conserve le salon et ses participants sains', async (_label, payload) => {
     const hote = compte({ org: nouvelleOrg() });
     const room = createRoom({ hostId: hote.id, hostName: 'Hôte', name: 'Témoin invité', hostOrgId: null });
     const { ws: wsHote } = await connecte(hote);
@@ -303,7 +309,7 @@ describe('F-D6D44F : isolation des messages WebSocket invalides', () => {
     envoyer(invite, { type: 'conf:join', name: 'Invité' });
     await attendre(invite, (m) => m.type === 'conf:peers' && m.room === room.id);
     const fermeture = attendreFermeture(invite);
-    invite.send(JSON.stringify({ type: 'conf:signal', to: { toString: null, valueOf: null }, data: 'x' }));
+    invite.send(payload);
     expect(await fermeture).toBe(1008);
 
     const autre = ouvrir(issueGuestToken(room, 'Témoin'));
