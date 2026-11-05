@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import {
   getRoom, addParticipant, removeParticipant, setConfig,
-  banKeyForUser, banKeyForGuest,
+  banKeyForUser, banKeyForGuest, revokeGuestInvitations,
 } from './services/confrooms.js';
 import { JWT_SECRET as SECRET } from './config.js';
 import { db } from './db.js';
@@ -20,6 +20,29 @@ function debitDepasse(ws, maintenant = Date.now()) {
   if (!ws.debit || maintenant - ws.debit.depuis >= FENETRE_MS) ws.debit = { depuis: maintenant, n: 0 };
   ws.debit.n += 1;
   return ws.debit.n > MESSAGES_MAX;
+}
+
+// Ne jamais faire de coercition implicite d'objets JSON non fiables dans le
+// répartiteur (String/Number peuvent lever une exception hors de JSON.parse).
+function messageValide(raw) {
+  let msg;
+  try { msg = JSON.parse(raw.toString()); } catch { return null; }
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.type !== 'string') return null;
+  const id = (v) => typeof v === 'string' && v.length > 0;
+  const cible = (v) => id(v) || (typeof v === 'number' && Number.isSafeInteger(v) && v > 0);
+  if (msg.type === 'rtc:signal' && !cible(msg.to)) return null;
+  if (msg.type.startsWith('conf:')) {
+    if (msg.room !== undefined && typeof msg.room !== 'string') return null;
+    if (msg.name !== undefined && typeof msg.name !== 'string') return null;
+    if (['conf:signal', 'conf:kick'].includes(msg.type) && !cible(msg.to)) return null;
+    if (msg.type === 'conf:config' && msg.config !== undefined
+      && (!msg.config || typeof msg.config !== 'object' || Array.isArray(msg.config))) return null;
+  }
+  return msg;
+}
+
+function fermerMessageInvalide(ws) {
+  try { ws.close(1008, 'message-invalide'); } catch { try { ws.terminate(); } catch {} }
 }
 
 const clients = new Map(); // userId -> Set<ws>
@@ -54,10 +77,12 @@ function confJoin(ws, roomId, name) {
   // les liens d'invitation actifs — quiconque a le lien (invité sans compte ou autre compte).
   const estHote = !ws.isGuest && ws.userId === room.hostId;
   const memeOrgHote = !ws.isGuest && !!room.hostOrgId && orgDe(ws.userId) === room.hostOrgId;
-  if (!estHote && !memeOrgHote && !room.config.linkEnabled) { ws.send(JSON.stringify({ type: 'conf:error', code: 'link-disabled' })); return; }
-  if (!ws.isGuest && room.banned.has(banKeyForUser(ws.userId))) { ws.send(JSON.stringify({ type: 'conf:error', code: 'banned' })); return; }
-
   ws.peerId = ws.peerId || randomPeerId();
+  // La même socket conserve son peerId après kick. Un invité anonyme peut aussi
+  // obtenir un nouveau jeton : le lien entier est révoqué lors de son exclusion.
+  const banKey = ws.isGuest ? banKeyForGuest(ws.peerId) : banKeyForUser(ws.userId);
+  if (room.banned.has(banKey)) { ws.send(JSON.stringify({ type: 'conf:error', code: 'banned' })); return; }
+  if (!estHote && !memeOrgHote && !room.config.linkEnabled) { ws.send(JSON.stringify({ type: 'conf:error', code: 'link-disabled' })); return; }
   ws.confName = String(name || ws.guestName || 'Invité').slice(0, 60);
   const isHost = !ws.isGuest && ws.userId === room.hostId;
 
@@ -100,8 +125,12 @@ function confKick(ws, roomId, targetPeerId) {
   const target = confSockets.get(roomId)?.get(targetPeerId);
   if (!target || target === ws) return;
   room.banned.add(target.isGuest ? banKeyForGuest(targetPeerId) : banKeyForUser(target.userId));
+  // Sans identité persistante, bloquer seulement le peerId ou le JWT ne suffit
+  // pas : la route publique délivrerait un nouveau jeton pour le même lien.
+  if (target.isGuest) revokeGuestInvitations(room);
   try { target.send(JSON.stringify({ type: 'conf:kicked', room: roomId })); } catch {}
   confLeave(target, roomId);
+  if (target.isGuest) confBroadcast(roomId, { type: 'conf:config', room: roomId, config: room.config });
 }
 
 // Modifier la config du salon (hôte uniquement) → diffusée à tous.
@@ -223,11 +252,14 @@ export function attachWebSocket(server) {
       ws.isAlive = true;
       ws.on('pong', () => { ws.isAlive = true; });
       ws.on('message', (raw) => {
-        if (!liveSession(ws) || debitDepasse(ws)) return;
-        let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
-        if (msg.type === 'conf:join') confJoin(ws, ws.guestRoom, msg.name); // un invité ne rejoint que SON salon
-        else if (msg.type === 'conf:leave') confLeave(ws, ws.guestRoom);
-        else if (msg.type === 'conf:signal' && msg.to) confSignal(ws, ws.guestRoom, String(msg.to), msg.data);
+        try {
+          if (!liveSession(ws) || debitDepasse(ws)) return;
+          const msg = messageValide(raw);
+          if (!msg) { fermerMessageInvalide(ws); return; }
+          if (msg.type === 'conf:join') confJoin(ws, ws.guestRoom, msg.name); // un invité ne rejoint que SON salon
+          else if (msg.type === 'conf:leave') confLeave(ws, ws.guestRoom);
+          else if (msg.type === 'conf:signal' && msg.to) confSignal(ws, ws.guestRoom, String(msg.to), msg.data);
+        } catch { fermerMessageInvalide(ws); }
       });
       ws.on('close', () => { if (ws.confJoined) for (const room of [...ws.confJoined]) confLeave(ws, room); });
     }
@@ -246,23 +278,27 @@ export function attachWebSocket(server) {
     if (wasOffline) annoncerPresence(userId, true);
 
     ws.on('message', (raw) => {
-      if (!liveSession(ws) || debitDepasse(ws)) return;
-      let msg;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
-      if (msg.type === 'rtc:signal' && msg.to) {
-        const to = Number(msg.to);
-        if (rtcAutorise(ws, to)) notifyUser(to, { type: 'rtc:signal', from: userId, data: msg.data });
-      } else if (msg.type === 'conf:join') {
-        confJoin(ws, String(msg.room || ''), msg.name);
-      } else if (msg.type === 'conf:leave') {
-        confLeave(ws, String(msg.room || ''));
-      } else if (msg.type === 'conf:signal' && msg.to) {
-        confSignal(ws, String(msg.room || ''), String(msg.to), msg.data);
-      } else if (msg.type === 'conf:kick' && msg.to) {
-        confKick(ws, String(msg.room || ''), String(msg.to));
-      } else if (msg.type === 'conf:config') {
-        confConfig(ws, String(msg.room || ''), msg.config);
-      }
+      try {
+        if (!liveSession(ws) || debitDepasse(ws)) return;
+        const msg = messageValide(raw);
+        if (!msg) { fermerMessageInvalide(ws); return; }
+        if (msg.type === 'rtc:signal' && msg.to) {
+          const to = Number(msg.to);
+          if (Number.isSafeInteger(to) && to > 0 && rtcAutorise(ws, to)) {
+            notifyUser(to, { type: 'rtc:signal', from: userId, data: msg.data });
+          }
+        } else if (msg.type === 'conf:join') {
+          confJoin(ws, msg.room || '', msg.name);
+        } else if (msg.type === 'conf:leave') {
+          confLeave(ws, msg.room || '');
+        } else if (msg.type === 'conf:signal' && msg.to) {
+          confSignal(ws, msg.room || '', String(msg.to), msg.data);
+        } else if (msg.type === 'conf:kick' && msg.to) {
+          confKick(ws, msg.room || '', String(msg.to));
+        } else if (msg.type === 'conf:config') {
+          confConfig(ws, msg.room || '', msg.config);
+        }
+      } catch { fermerMessageInvalide(ws); }
     });
 
     ws.on('close', () => {

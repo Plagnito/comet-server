@@ -1,0 +1,33 @@
+name: Security WebSocket message validation
+
+on:
+  pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/security-ws-message.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  websocket-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Security integration regression
+        run: npx vitest run test/autorisations-equipe.test.js
+      - name: Full server test suite
+        run: npm test
